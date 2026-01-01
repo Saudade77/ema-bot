@@ -648,17 +648,48 @@ async def run_trailing_bot(context: ContextTypes.DEFAULT_TYPE):
             try:
                 result = trailing_bot.process_order(order)
                 
-                if "更新" in result or "新建" in result or "成交" in result:
+                # 🔥 关键修改：记录所有处理结果
+                logger.info(f"订单 {order['id']} 处理结果: {result}")
+                
+                # 如果包含重要信息，发送通知
+                important_keywords = ["更新", "新建", "成交", "取消", "失效", "错误", "❌", "⚠️", "成功"]
+                if any(keyword in result for keyword in important_keywords):
+                    try:
+                        await context.bot.send_message(
+                            chat_id=AUTHORIZED_CHAT_ID,
+                            text=f"📊 *订单处理*\n\nID: `{order['id']}`\n\n{result}",
+                            parse_mode='Markdown'
+                        )
+                    except Exception as send_err:
+                        logger.error(f"发送消息失败: {send_err}")
+                    
+            except Exception as e:
+                error_msg = f"处理订单 {order['id']} 出错: {str(e)}"
+                logger.error(error_msg)
+                
+                # 🔥 发送详细错误通知
+                try:
                     await context.bot.send_message(
                         chat_id=AUTHORIZED_CHAT_ID,
-                        text=f"📊 *{order['id']}*\n{result}",
+                        text=f"⚠️ *订单处理异常*\n\n"
+                             f"ID: `{order['id']}`\n"
+                             f"错误: {str(e)[:300]}",
                         parse_mode='Markdown'
                     )
-            except Exception as e:
-                logger.error(f"处理订单 {order['id']} 出错: {e}")
+                except Exception as send_err:
+                    logger.error(f"发送错误消息失败: {send_err}")
     
     except Exception as e:
-        logger.error(f"追踪任务出错: {e}")
+        error_msg = f"追踪任务出错: {str(e)}"
+        logger.error(error_msg)
+        try:
+            await context.bot.send_message(
+                chat_id=AUTHORIZED_CHAT_ID,
+                text=f"❌ *机器人任务异常*\n\n{str(e)[:300]}",
+                parse_mode='Markdown'
+            )
+        except Exception as send_err:
+            logger.error(f"发送错误消息失败: {send_err}")
 
 
 async def cmd_start_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):

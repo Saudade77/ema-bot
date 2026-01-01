@@ -343,7 +343,7 @@ class EMATrailingBot:
     
     def __init__(self):
         self.client = BinanceClient()
-        self.price_threshold = 0.003  # 提高到 0.3% 避免频繁更新
+        self.price_threshold = 0.003  # 0.3% 避免频繁更新
     
     def process_order(self, order_config: dict) -> str:
         """处理单个订单"""
@@ -382,8 +382,31 @@ class EMATrailingBot:
                     try:
                         print(f"🔄 准备更新订单 {order_id}")
                         print(f"   旧价格: {order_price:.4f}, 新价格: {ema_price:.4f}")
+                        print(f"   交易对: {symbol}, 方向: {side}, 数量: {quantity}")
+                        
+                        # 检查余额
+                        try:
+                            balance = self.client.get_account_balance()
+                            usdt_balance = balance.get('USDT', 0)
+                            estimated_cost = ema_price * quantity
+                            print(f"   账户余额: {usdt_balance:.2f} USDT")
+                            print(f"   预估花费: {estimated_cost:.2f} USDT")
+                            
+                            if usdt_balance < estimated_cost * 1.1:  # 预留10%手续费
+                                error_msg = f"余额不足！需要 {estimated_cost:.2f} USDT，可用 {usdt_balance:.2f} USDT"
+                                print(f"❌ {error_msg}")
+                                send_telegram_message(
+                                    f"⚠️ *余额不足，无法更新订单*\n\n"
+                                    f"ID: `{order_id}`\n"
+                                    f"需要: {estimated_cost:.2f} USDT\n"
+                                    f"可用: {usdt_balance:.2f} USDT"
+                                )
+                                return f"❌ 余额不足"
+                        except Exception as balance_err:
+                            print(f"⚠️ 检查余额失败: {balance_err}")
                         
                         # 1. 先创建新订单
+                        print(f"   开始创建新订单...")
                         new_order = self.client.create_order(symbol, side, ema_price, quantity)
                         new_order_id = new_order['orderId']
                         print(f"✅ 新订单创建成功: {new_order_id}")
@@ -430,31 +453,31 @@ class EMATrailingBot:
                             f"📦 数量: {quantity}\n\n"
                             f"💰 当前价格: `{current_price:,.4f}`\n"
                             f"━━━━━━━━━━━━━━━\n"
-                            f"❌ 旧订单价: `{order_price:,.4f}`\n"
-                            f"✅ 新订单价: `{ema_price:,.4f}`\n"
+                            f"❌ 旧订单: `{binance_order_id}` @ {order_price:,.4f}\n"
+                            f"✅ 新订单: `{new_order_id}` @ {ema_price:,.4f}\n"
                             f"📈 变动: {direction} {abs(diff_percent):.2f}%\n"
                             f"━━━━━━━━━━━━━━━\n"
                             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                         )
                         send_telegram_message(message)
                         
-                        return f"📝 更新 {order_price:.4f} → {ema_price:.4f}"
+                        return f"📝 更新成功 {order_price:.4f} → {ema_price:.4f}"
                     
                     except Exception as update_err:
                         error_msg = str(update_err)
                         print(f"❌ 更新订单失败: {error_msg}")
                         
-                        # 发送错误通知
+                        # 发送详细错误通知
                         send_telegram_message(
                             f"⚠️ *订单更新失败*\n\n"
                             f"ID: `{order_id}`\n"
-                            f"错误: {error_msg[:200]}\n\n"
+                            f"错误: {error_msg[:300]}\n\n"
                             f"旧订单保持不变: {binance_order_id}"
                         )
                         
                         return f"❌ 更新失败: {error_msg[:50]}"
                 else:
-                    return f"✓ EMA={ema_price:.4f} 订单={order_price:.4f}"
+                    return f"✓ EMA={ema_price:.4f} 订单={order_price:.4f} (差异{price_diff*100:.2f}%)"
             
             else:
                 # 订单不存在
@@ -481,7 +504,7 @@ class EMATrailingBot:
                     elif order_status and order_status.get('status') == 'CANCELED':
                         # 订单被手动取消
                         message = (
-                            f"🚫 *订单已被手动取消*\n\n"
+                            f"🚫 *订单已被取消*\n\n"
                             f"📌 ID: `{order_id}`\n"
                             f"💱 交易对: {symbol}\n"
                             f"📊 周期: {interval} | EMA{ema_period}\n"
@@ -509,6 +532,7 @@ class EMATrailingBot:
                         return "⚠️ 已失效，停止追踪"
                 
                 # 首次下单
+                print(f"📌 首次创建订单 {order_id}")
                 new_order = self.client.create_order(symbol, side, ema_price, quantity)
                 OrderManager.update_binance_order_id(order_id, new_order['orderId'])
                 
@@ -530,7 +554,9 @@ class EMATrailingBot:
         except Exception as e:
             error_msg = str(e)
             print(f"❌ 处理订单 {order_id} 出错: {error_msg}")
-            return f"❌ 错误: {error_msg[:50]}"
+            import traceback
+            traceback.print_exc()
+            return f"❌ 错误: {error_msg[:100]}"
     
     def run(self, check_interval: int = 60):
         """主循环"""
@@ -585,7 +611,7 @@ class EMATrailingBot:
                         send_telegram_message(
                             f"⚠️ *订单处理错误*\n\n"
                             f"ID: `{order['id']}`\n"
-                            f"错误: {str(e)[:100]}"
+                            f"错误: {str(e)[:200]}"
                         )
                 
                 print("-" * 40)
