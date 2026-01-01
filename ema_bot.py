@@ -136,6 +136,16 @@ class OrderManager:
                 o['binance_order_id'] = binance_order_id
                 break
         OrderManager.save_orders(orders)
+    
+    @staticmethod
+    def mark_order_error(order_id: str, has_error: bool):
+        """标记订单是否有错误（用于避免重复通知）"""
+        orders = OrderManager.load_orders()
+        for o in orders:
+            if o['id'] == order_id:
+                o['has_error'] = has_error
+                break
+        OrderManager.save_orders(orders)
 
 
 class BinanceClient:
@@ -146,24 +156,22 @@ class BinanceClient:
         if not self.api_key or not self.api_secret:
             raise ValueError("API_KEY 或 API_SECRET 未配置")
         
+        # 去除可能的空格和换行
+        self.api_key = self.api_key.strip()
+        self.api_secret = self.api_secret.strip()
+        
         self.base_url = "https://fapi.binance.com"
         
-        # 每次请求都重新设置 headers
         self.session = requests.Session()
-        self._update_headers()
+        self.session.headers.update({
+            'X-MBX-APIKEY': self.api_key
+        })
 
         self.time_offset = 0
         self._sync_time()
         
         # 缓存交易对信息
         self._exchange_info = None
-    
-    def _update_headers(self):
-        """更新请求头，确保 API Key 正确"""
-        self.session.headers.update({
-            'X-MBX-APIKEY': self.api_key,
-            'Content-Type': 'application/x-www-form-urlencoded'
-        })
     
     def _sync_time(self):
         """同步合约服务器时间"""
@@ -178,8 +186,8 @@ class BinanceClient:
             print(f"⚠️ 时间同步失败: {e}")
             self.time_offset = 0
     
-    def _sign(self, params: dict) -> dict:
-        """签名"""
+    def _sign(self, params: dict) -> str:
+        """签名并返回完整的 query string"""
         params['timestamp'] = int(time.time() * 1000) + self.time_offset
         params['recvWindow'] = 10000
         query_string = '&'.join(f"{k}={v}" for k, v in params.items())
@@ -188,8 +196,7 @@ class BinanceClient:
             query_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
-        params['signature'] = signature
-        return params
+        return f"{query_string}&signature={signature}"
 
     def get_symbol_info(self, symbol: str) -> dict:
         """获取交易对精度信息（带缓存）"""
@@ -210,18 +217,15 @@ class BinanceClient:
         if not info:
             return f"{price:.2f}"
         
-        # 获取价格精度
         for f in info['filters']:
             if f['filterType'] == 'PRICE_FILTER':
                 tick_size = float(f['tickSize'])
                 
-                # 计算小数位数
                 if tick_size >= 1:
                     precision = 0
                 else:
                     precision = len(str(tick_size).rstrip('0').split('.')[-1])
                 
-                # 向下取整到tick_size的倍数
                 price = (price // tick_size) * tick_size
                 return f"{price:.{precision}f}"
         
@@ -233,18 +237,15 @@ class BinanceClient:
         if not info:
             return str(quantity)
         
-        # 获取数量精度
         for f in info['filters']:
             if f['filterType'] == 'LOT_SIZE':
                 step_size = float(f['stepSize'])
                 
-                # 计算小数位数
                 if step_size >= 1:
                     precision = 0
                 else:
                     precision = len(str(step_size).rstrip('0').split('.')[-1])
                 
-                # 向下取整到step_size的倍数
                 quantity = (quantity // step_size) * step_size
                 return f"{quantity:.{precision}f}"
         
@@ -277,24 +278,22 @@ class BinanceClient:
 
     def get_open_orders(self, symbol: str) -> list:
         """获取合约挂单"""
-        self._update_headers()  # 确保 headers 正确
         url = f"{self.base_url}/fapi/v1/openOrders"
-        params = self._sign({'symbol': symbol})
-        resp = self.session.get(url, params=params)
+        query_string = self._sign({'symbol': symbol})
+        resp = self.session.get(f"{url}?{query_string}")
         resp.raise_for_status()
         return resp.json()
 
     def get_order_status(self, symbol: str, order_id: int) -> dict:
         """查询合约订单状态"""
         try:
-            self._update_headers()  # 确保 headers 正确
             url = f"{self.base_url}/fapi/v1/order"
             params = {
                 'symbol': symbol,
                 'orderId': order_id
             }
-            params = self._sign(params)
-            resp = self.session.get(url, params=params)
+            query_string = self._sign(params)
+            resp = self.session.get(f"{url}?{query_string}")
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -303,10 +302,9 @@ class BinanceClient:
 
     def get_account_balance(self) -> dict:
         """获取合约账户余额"""
-        self._update_headers()  # 确保 headers 正确
         url = f"{self.base_url}/fapi/v2/balance"
-        params = self._sign({})
-        resp = self.session.get(url, params=params)
+        query_string = self._sign({})
+        resp = self.session.get(f"{url}?{query_string}")
         resp.raise_for_status()
         data = resp.json()
         
@@ -318,10 +316,7 @@ class BinanceClient:
         return balances
 
     def create_order(self, symbol: str, side: str, price: float, quantity: float):
-        """下合约限价单（带精度格式化）"""
-        self._update_headers()  # 确保 headers 正确
-        
-        # 格式化价格和数量
+        """下合约限价单"""
         price_str = self.format_price(symbol, price)
         quantity_str = self.format_quantity(symbol, quantity)
         
@@ -336,29 +331,27 @@ class BinanceClient:
             'quantity': quantity_str,
             'price': price_str
         }
-        params = self._sign(params)
+        query_string = self._sign(params)
         
-        # 使用 POST 请求，参数放在 body 中
-        resp = self.session.post(url, data=params)
+        # 使用 query string 方式发送 POST 请求
+        resp = self.session.post(f"{url}?{query_string}")
         
-        # 检查响应
         if resp.status_code != 200:
             error_detail = resp.text
             print(f"❌ 下单失败: {resp.status_code} - {error_detail}")
-            resp.raise_for_status()
+            raise Exception(f"下单失败: {error_detail}")
         
         return resp.json()
 
     def cancel_order(self, symbol: str, order_id: int):
         """取消合约订单"""
-        self._update_headers()  # 确保 headers 正确
         url = f"{self.base_url}/fapi/v1/order"
         params = {
             'symbol': symbol,
             'orderId': order_id
         }
-        params = self._sign(params)
-        resp = self.session.delete(url, params=params)
+        query_string = self._sign(params)
+        resp = self.session.delete(f"{url}?{query_string}")
         resp.raise_for_status()
         return resp.json()
 
@@ -379,6 +372,7 @@ class EMATrailingBot:
         quantity = order_config['quantity']
         binance_order_id = order_config.get('binance_order_id')
         order_id = order_config['id']
+        has_error = order_config.get('has_error', False)  # 是否已经报过错
         
         try:
             # 计算当前EMA
@@ -406,7 +400,6 @@ class EMATrailingBot:
                     # === 先取消旧订单，再下新订单 ===
                     print(f"🔄 准备更新订单 {order_id}")
                     print(f"   旧价格: {order_price:.4f}, 新价格: {ema_price:.4f}")
-                    print(f"   交易对: {symbol}, 方向: {side}, 数量: {quantity}")
                     
                     # 1. 先取消旧订单
                     print(f"   正在取消旧订单 {binance_order_id}...")
@@ -417,7 +410,6 @@ class EMATrailingBot:
                         error_str = str(cancel_err)
                         print(f"⚠️ 取消旧订单失败: {error_str}")
                         
-                        # 检查是否是"订单不存在"错误（可能已成交）
                         if "Unknown order" in error_str or "-2011" in error_str:
                             old_status = self.client.get_order_status(symbol, binance_order_id)
                             if old_status and old_status.get('status') == 'FILLED':
@@ -429,23 +421,21 @@ class EMATrailingBot:
                                 )
                                 return "🎉 订单已成交"
                         
-                        return f"⚠️ 取消旧订单失败: {error_str[:50]}"
+                        return f"⚠️ 取消失败"
                     
-                    # 2. 短暂等待确保取消生效
-                    time.sleep(0.5)
+                    # 2. 等待
+                    time.sleep(0.3)
                     
-                    # 3. 重新初始化客户端确保连接正常
-                    self.client._update_headers()
-                    
-                    # 4. 创建新订单
+                    # 3. 创建新订单
                     print(f"   正在创建新订单...")
                     try:
                         new_order = self.client.create_order(symbol, side, ema_price, quantity)
                         new_order_id = new_order['orderId']
                         print(f"✅ 新订单创建成功: {new_order_id}")
                         
-                        # 5. 更新本地记录
+                        # 更新本地记录，清除错误标记
                         OrderManager.update_binance_order_id(order_id, new_order_id)
+                        OrderManager.mark_order_error(order_id, False)
                         
                         diff_percent = ((ema_price - order_price) / order_price) * 100
                         direction = "↑" if diff_percent > 0 else "↓"
@@ -459,11 +449,9 @@ class EMATrailingBot:
                             f"📦 数量: {quantity}\n\n"
                             f"💰 当前价格: `{current_price:,.4f}`\n"
                             f"━━━━━━━━━━━━━━━\n"
-                            f"❌ 旧订单: `{binance_order_id}` @ {order_price:,.4f}\n"
-                            f"✅ 新订单: `{new_order_id}` @ {ema_price:,.4f}\n"
-                            f"📈 变动: {direction} {abs(diff_percent):.2f}%\n"
-                            f"━━━━━━━━━━━━━━━\n"
-                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            f"❌ 旧订单: @ {order_price:,.4f}\n"
+                            f"✅ 新订单: @ {ema_price:,.4f}\n"
+                            f"📈 变动: {direction} {abs(diff_percent):.2f}%"
                         )
                         send_telegram_message(message)
                         
@@ -473,30 +461,33 @@ class EMATrailingBot:
                         error_msg = str(create_err)
                         print(f"❌ 创建新订单失败: {error_msg}")
                         
-                        # 新订单创建失败，旧订单已经取消了
-                        send_telegram_message(
-                            f"⚠️ *订单更新失败*\n\n"
-                            f"ID: `{order_id}`\n"
-                            f"错误: {error_msg[:300]}\n\n"
-                            f"⚠️ 旧订单已取消，新订单创建失败！\n"
-                            f"请手动检查仓位"
-                        )
+                        # 只在第一次出错时发送通知
+                        if not has_error:
+                            send_telegram_message(
+                                f"⚠️ *订单更新失败*\n\n"
+                                f"ID: `{order_id}`\n"
+                                f"旧订单已取消，新订单创建失败\n"
+                                f"错误: {error_msg[:200]}\n\n"
+                                f"请手动检查仓位"
+                            )
+                            OrderManager.mark_order_error(order_id, True)
                         
-                        # 清除本地的 binance_order_id，下次循环会重新下单
+                        # 清除 binance_order_id，下次会重新下单
                         OrderManager.update_binance_order_id(order_id, None)
                         
-                        return f"❌ 创建新订单失败: {error_msg[:50]}"
+                        return f"❌ 创建失败"
                 else:
-                    return f"✓ EMA={ema_price:.4f} 订单={order_price:.4f} (差异{price_diff*100:.2f}%)"
+                    # 清除错误标记（订单正常）
+                    if has_error:
+                        OrderManager.mark_order_error(order_id, False)
+                    return f"✓ 差异{price_diff*100:.2f}%"
             
             else:
                 # 订单不存在
                 if binance_order_id is not None:
-                    # 之前有订单ID，现在没了 -> 判断是成交还是被取消
                     order_status = self.client.get_order_status(symbol, binance_order_id)
                     
                     if order_status and order_status.get('status') == 'FILLED':
-                        # 订单已成交
                         avg_price = float(order_status.get('avgPrice', 0))
                         message = (
                             f"🎉 *订单已成交!*\n\n"
@@ -504,52 +495,69 @@ class EMATrailingBot:
                             f"💱 交易对: {symbol}\n"
                             f"🎯 方向: {side}\n"
                             f"📦 数量: {quantity}\n"
-                            f"💵 成交价: `{avg_price:,.4f}`\n"
-                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            f"💵 成交价: `{avg_price:,.4f}`"
                         )
                         send_telegram_message(message)
                         OrderManager.remove_order(order_id)
-                        return "🎉 已成交，停止追踪"
+                        return "🎉 已成交"
                     
-                    elif order_status and order_status.get('status') == 'CANCELED':
-                        # 订单被取消，重新下单
-                        print(f"📌 订单被取消，重新下单 {order_id}")
-                    
-                    elif order_status and order_status.get('status') == 'EXPIRED':
-                        # 订单已过期，重新下单
-                        print(f"📌 订单已过期，重新下单 {order_id}")
-                    
+                    elif order_status and order_status.get('status') in ['CANCELED', 'EXPIRED']:
+                        print(f"📌 订单已取消/过期，重新下单 {order_id}")
                     else:
-                        # 其他情况，尝试重新下单
                         status = order_status.get('status', '未知') if order_status else '未知'
-                        print(f"📌 订单状态: {status}，尝试重新下单 {order_id}")
+                        print(f"📌 订单状态: {status}，重新下单 {order_id}")
                 
-                # 首次下单或重新下单
+                # 创建新订单
                 print(f"📌 创建订单 {order_id}")
-                new_order = self.client.create_order(symbol, side, ema_price, quantity)
-                OrderManager.update_binance_order_id(order_id, new_order['orderId'])
+                try:
+                    new_order = self.client.create_order(symbol, side, ema_price, quantity)
+                    OrderManager.update_binance_order_id(order_id, new_order['orderId'])
+                    OrderManager.mark_order_error(order_id, False)
+                    
+                    message = (
+                        f"📌 *新订单已创建*\n\n"
+                        f"📌 ID: `{order_id}`\n"
+                        f"💱 交易对: {symbol}\n"
+                        f"📊 周期: {interval} | EMA{ema_period}\n"
+                        f"🎯 方向: {side}\n"
+                        f"📦 数量: {quantity}\n"
+                        f"💵 挂单价: `{ema_price:,.4f}`\n"
+                        f"💰 当前价: `{current_price:,.4f}`"
+                    )
+                    send_telegram_message(message)
+                    
+                    return f"📌 新建 @ {ema_price:.4f}"
                 
-                message = (
-                    f"📌 *新订单已创建*\n\n"
-                    f"📌 ID: `{order_id}`\n"
-                    f"💱 交易对: {symbol}\n"
-                    f"📊 周期: {interval} | EMA{ema_period}\n"
-                    f"🎯 方向: {side}\n"
-                    f"📦 数量: {quantity}\n"
-                    f"💵 挂单价: `{ema_price:,.4f}`\n"
-                    f"💰 当前价: `{current_price:,.4f}`\n"
-                    f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-                send_telegram_message(message)
-                
-                return f"📌 新建订单 @ {ema_price:.4f}"
+                except Exception as create_err:
+                    error_msg = str(create_err)
+                    print(f"❌ 创建订单失败: {error_msg}")
+                    
+                    # 只在第一次出错时发送通知
+                    if not has_error:
+                        send_telegram_message(
+                            f"⚠️ *创建订单失败*\n\n"
+                            f"ID: `{order_id}`\n"
+                            f"错误: {error_msg[:200]}\n\n"
+                            f"请检查账户状态"
+                        )
+                        OrderManager.mark_order_error(order_id, True)
+                    
+                    return f"❌ 创建失败"
         
         except Exception as e:
             error_msg = str(e)
             print(f"❌ 处理订单 {order_id} 出错: {error_msg}")
-            import traceback
-            traceback.print_exc()
-            return f"❌ 错误: {error_msg[:100]}"
+            
+            # 只在第一次出错时发送通知
+            if not has_error:
+                send_telegram_message(
+                    f"⚠️ *订单处理错误*\n\n"
+                    f"ID: `{order_id}`\n"
+                    f"错误: {error_msg[:200]}"
+                )
+                OrderManager.mark_order_error(order_id, True)
+            
+            return f"❌ 错误"
     
     def run(self, check_interval: int = 60):
         """主循环"""
@@ -565,8 +573,7 @@ class EMATrailingBot:
             send_telegram_message(
                 f"🚀 *EMA追踪机器人已启动*\n\n"
                 f"⏱️ 检查间隔: {check_interval}秒\n"
-                f"📊 更新阈值: {self.price_threshold * 100}%\n"
-                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                f"📊 更新阈值: {self.price_threshold * 100}%"
             )
         
         try:
@@ -587,27 +594,16 @@ class EMATrailingBot:
                 active_orders = [o for o in orders if o.get('status') == 'active']
                 
                 if not active_orders:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 暂无追踪订单，等待添加...")
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 暂无追踪订单")
                     time.sleep(check_interval)
                     continue
                 
-                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                current_time = datetime.now().strftime('%H:%M:%S')
                 print(f"\n[{current_time}] 处理 {len(active_orders)} 个订单")
-                print("-" * 40)
                 
                 for order in active_orders:
-                    try:
-                        result = self.process_order(order)
-                        print(f"  {order['id']}: {result}")
-                    except Exception as e:
-                        print(f"  {order['id']}: ❌ 错误 - {e}")
-                        send_telegram_message(
-                            f"⚠️ *订单处理错误*\n\n"
-                            f"ID: `{order['id']}`\n"
-                            f"错误: {str(e)[:200]}"
-                        )
-                
-                print("-" * 40)
+                    result = self.process_order(order)
+                    print(f"  {order['id']}: {result}")
                 
             except KeyboardInterrupt:
                 print("\n\n⏹️ 用户停止机器人")
@@ -617,7 +613,6 @@ class EMATrailingBot:
             
             except Exception as e:
                 print(f"❌ 主循环错误: {e}")
-                send_telegram_message(f"❌ *机器人错误*\n\n{str(e)[:200]}")
             
             time.sleep(check_interval)
 
