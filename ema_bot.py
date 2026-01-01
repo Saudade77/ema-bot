@@ -150,6 +150,9 @@ class BinanceClient:
 
         self.time_offset = 0
         self._sync_time()
+        
+        # 缓存交易对信息
+        self._exchange_info = None
     
     def _sync_time(self):
         """同步合约服务器时间"""
@@ -176,6 +179,65 @@ class BinanceClient:
         ).hexdigest()
         params['signature'] = signature
         return params
+
+    def get_symbol_info(self, symbol: str) -> dict:
+        """获取交易对精度信息（带缓存）"""
+        if not self._exchange_info:
+            url = f"{self.base_url}/fapi/v1/exchangeInfo"
+            resp = self.session.get(url, timeout=10)
+            resp.raise_for_status()
+            self._exchange_info = resp.json()
+        
+        for s in self._exchange_info['symbols']:
+            if s['symbol'] == symbol:
+                return s
+        return None
+
+    def format_price(self, symbol: str, price: float) -> str:
+        """根据交易对规则格式化价格"""
+        info = self.get_symbol_info(symbol)
+        if not info:
+            return f"{price:.2f}"
+        
+        # 获取价格精度
+        for f in info['filters']:
+            if f['filterType'] == 'PRICE_FILTER':
+                tick_size = float(f['tickSize'])
+                
+                # 计算小数位数
+                if tick_size >= 1:
+                    precision = 0
+                else:
+                    precision = len(str(tick_size).rstrip('0').split('.')[-1])
+                
+                # 向下取整到tick_size的倍数
+                price = (price // tick_size) * tick_size
+                return f"{price:.{precision}f}"
+        
+        return f"{price:.2f}"
+
+    def format_quantity(self, symbol: str, quantity: float) -> str:
+        """根据交易对规则格式化数量"""
+        info = self.get_symbol_info(symbol)
+        if not info:
+            return str(quantity)
+        
+        # 获取数量精度
+        for f in info['filters']:
+            if f['filterType'] == 'LOT_SIZE':
+                step_size = float(f['stepSize'])
+                
+                # 计算小数位数
+                if step_size >= 1:
+                    precision = 0
+                else:
+                    precision = len(str(step_size).rstrip('0').split('.')[-1])
+                
+                # 向下取整到step_size的倍数
+                quantity = (quantity // step_size) * step_size
+                return f"{quantity:.{precision}f}"
+        
+        return str(quantity)
 
     def get_current_price(self, symbol: str) -> float:
         """获取合约当前价格"""
@@ -242,15 +304,21 @@ class BinanceClient:
         return balances
 
     def create_order(self, symbol: str, side: str, price: float, quantity: float):
-        """下合约限价单"""
+        """下合约限价单（带精度格式化）"""
+        # 格式化价格和数量
+        price_str = self.format_price(symbol, price)
+        quantity_str = self.format_quantity(symbol, quantity)
+        
+        print(f"📝 下单参数: {symbol} {side} 价格={price_str} 数量={quantity_str}")
+        
         url = f"{self.base_url}/fapi/v1/order"
         params = {
             'symbol': symbol,
             'side': side.upper(),
             'type': 'LIMIT',
             'timeInForce': 'GTC',
-            'quantity': quantity,
-            'price': price
+            'quantity': quantity_str,
+            'price': price_str
         }
         params = self._sign(params)
         resp = self.session.post(url, data=params)
@@ -275,7 +343,7 @@ class EMATrailingBot:
     
     def __init__(self):
         self.client = BinanceClient()
-        self.price_threshold = 0.001  # 0.1%价差触发更新
+        self.price_threshold = 0.003  # 提高到 0.3% 避免频繁更新
     
     def process_order(self, order_config: dict) -> str:
         """处理单个订单"""
@@ -287,127 +355,182 @@ class EMATrailingBot:
         binance_order_id = order_config.get('binance_order_id')
         order_id = order_config['id']
         
-        # 计算当前EMA
-        ema_price = self.client.calculate_ema(symbol, ema_period, interval)
-        
-        # 获取当前价格
-        current_price = self.client.get_current_price(symbol)
-        
-        # 检查币安订单状态
-        open_orders = self.client.get_open_orders(symbol)
-        our_order = None
-        
-        if binance_order_id:
-            for o in open_orders:
-                if o['orderId'] == binance_order_id:
-                    our_order = o
-                    break
-        
-        if our_order:
-            # 订单存在，检查是否需要更新
-            order_price = float(our_order['price'])
-            price_diff = abs(order_price - ema_price) / ema_price
+        try:
+            # 计算当前EMA
+            ema_price = self.client.calculate_ema(symbol, ema_period, interval)
             
-            if price_diff > self.price_threshold:
-                # 更新订单
-                self.client.cancel_order(symbol, binance_order_id)
+            # 获取当前价格
+            current_price = self.client.get_current_price(symbol)
+            
+            # 检查币安订单状态
+            open_orders = self.client.get_open_orders(symbol)
+            our_order = None
+            
+            if binance_order_id:
+                for o in open_orders:
+                    if o['orderId'] == binance_order_id:
+                        our_order = o
+                        break
+            
+            if our_order:
+                # 订单存在，检查是否需要更新
+                order_price = float(our_order['price'])
+                price_diff = abs(order_price - ema_price) / ema_price
+                
+                if price_diff > self.price_threshold:
+                    # === 关键修复：先创建新订单，成功后再取消旧订单 ===
+                    try:
+                        print(f"🔄 准备更新订单 {order_id}")
+                        print(f"   旧价格: {order_price:.4f}, 新价格: {ema_price:.4f}")
+                        
+                        # 1. 先创建新订单
+                        new_order = self.client.create_order(symbol, side, ema_price, quantity)
+                        new_order_id = new_order['orderId']
+                        print(f"✅ 新订单创建成功: {new_order_id}")
+                        
+                        # 2. 新订单成功后，取消旧订单
+                        try:
+                            self.client.cancel_order(symbol, binance_order_id)
+                            print(f"✅ 旧订单已取消: {binance_order_id}")
+                        except Exception as cancel_err:
+                            print(f"⚠️ 取消旧订单失败（可能已成交）: {cancel_err}")
+                            # 如果旧订单取消失败（可能已成交），需要取消新订单
+                            try:
+                                self.client.cancel_order(symbol, new_order_id)
+                                print(f"⚠️ 已取消新订单避免重复: {new_order_id}")
+                            except:
+                                pass
+                            
+                            # 检查旧订单状态
+                            old_status = self.client.get_order_status(symbol, binance_order_id)
+                            if old_status and old_status.get('status') == 'FILLED':
+                                OrderManager.remove_order(order_id)
+                                send_telegram_message(
+                                    f"🎉 *订单已成交*\n\n"
+                                    f"ID: `{order_id}`\n"
+                                    f"价格: {order_price:.4f}\n"
+                                    f"注意: 更新过程中旧订单已成交"
+                                )
+                                return "🎉 旧订单已成交"
+                            
+                            return f"⚠️ 更新失败，保持原订单"
+                        
+                        # 3. 更新本地记录
+                        OrderManager.update_binance_order_id(order_id, new_order_id)
+                        
+                        diff_percent = ((ema_price - order_price) / order_price) * 100
+                        direction = "↑" if diff_percent > 0 else "↓"
+                        
+                        message = (
+                            f"🔄 *订单已更新*\n\n"
+                            f"📌 ID: `{order_id}`\n"
+                            f"💱 交易对: {symbol}\n"
+                            f"📊 周期: {interval} | EMA{ema_period}\n"
+                            f"🎯 方向: {side}\n"
+                            f"📦 数量: {quantity}\n\n"
+                            f"💰 当前价格: `{current_price:,.4f}`\n"
+                            f"━━━━━━━━━━━━━━━\n"
+                            f"❌ 旧订单价: `{order_price:,.4f}`\n"
+                            f"✅ 新订单价: `{ema_price:,.4f}`\n"
+                            f"📈 变动: {direction} {abs(diff_percent):.2f}%\n"
+                            f"━━━━━━━━━━━━━━━\n"
+                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        send_telegram_message(message)
+                        
+                        return f"📝 更新 {order_price:.4f} → {ema_price:.4f}"
+                    
+                    except Exception as update_err:
+                        error_msg = str(update_err)
+                        print(f"❌ 更新订单失败: {error_msg}")
+                        
+                        # 发送错误通知
+                        send_telegram_message(
+                            f"⚠️ *订单更新失败*\n\n"
+                            f"ID: `{order_id}`\n"
+                            f"错误: {error_msg[:200]}\n\n"
+                            f"旧订单保持不变: {binance_order_id}"
+                        )
+                        
+                        return f"❌ 更新失败: {error_msg[:50]}"
+                else:
+                    return f"✓ EMA={ema_price:.4f} 订单={order_price:.4f}"
+            
+            else:
+                # 订单不存在
+                if binance_order_id is not None:
+                    # 之前有订单ID，现在没了 -> 判断是成交还是被取消
+                    order_status = self.client.get_order_status(symbol, binance_order_id)
+                    
+                    if order_status and order_status.get('status') == 'FILLED':
+                        # 订单已成交
+                        avg_price = float(order_status.get('avgPrice', 0))
+                        message = (
+                            f"🎉 *订单已成交!*\n\n"
+                            f"📌 ID: `{order_id}`\n"
+                            f"💱 交易对: {symbol}\n"
+                            f"🎯 方向: {side}\n"
+                            f"📦 数量: {quantity}\n"
+                            f"💵 成交价: `{avg_price:,.4f}`\n"
+                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        send_telegram_message(message)
+                        OrderManager.remove_order(order_id)
+                        return "🎉 已成交，停止追踪"
+                    
+                    elif order_status and order_status.get('status') == 'CANCELED':
+                        # 订单被手动取消
+                        message = (
+                            f"🚫 *订单已被手动取消*\n\n"
+                            f"📌 ID: `{order_id}`\n"
+                            f"💱 交易对: {symbol}\n"
+                            f"📊 周期: {interval} | EMA{ema_period}\n"
+                            f"🎯 方向: {side}\n\n"
+                            f"已自动停止追踪此订单\n"
+                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        send_telegram_message(message)
+                        OrderManager.remove_order(order_id)
+                        return "🚫 已取消，停止追踪"
+                    
+                    else:
+                        # 其他情况
+                        status = order_status.get('status', '未知') if order_status else '未知'
+                        message = (
+                            f"⚠️ *订单已失效*\n\n"
+                            f"📌 ID: `{order_id}`\n"
+                            f"💱 交易对: {symbol}\n"
+                            f"状态: {status}\n\n"
+                            f"已自动停止追踪此订单\n"
+                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        send_telegram_message(message)
+                        OrderManager.remove_order(order_id)
+                        return "⚠️ 已失效，停止追踪"
+                
+                # 首次下单
                 new_order = self.client.create_order(symbol, side, ema_price, quantity)
                 OrderManager.update_binance_order_id(order_id, new_order['orderId'])
                 
-                diff_percent = ((ema_price - order_price) / order_price) * 100
-                direction = "↑" if diff_percent > 0 else "↓"
-                
                 message = (
-                    f"🔄 *订单已更新*\n\n"
+                    f"📌 *新订单已创建*\n\n"
                     f"📌 ID: `{order_id}`\n"
                     f"💱 交易对: {symbol}\n"
                     f"📊 周期: {interval} | EMA{ema_period}\n"
                     f"🎯 方向: {side}\n"
-                    f"📦 数量: {quantity}\n\n"
-                    f"💰 当前价格: `{current_price:,.2f}`\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"❌ 旧订单价: `{order_price:,.2f}`\n"
-                    f"✅ 新订单价: `{ema_price:,.2f}`\n"
-                    f"📈 变动: {direction} {abs(diff_percent):.2f}%\n"
-                    f"━━━━━━━━━━━━━━━\n"
+                    f"📦 数量: {quantity}\n"
+                    f"💵 挂单价: `{ema_price:,.4f}`\n"
+                    f"💰 当前价: `{current_price:,.4f}`\n"
                     f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 send_telegram_message(message)
                 
-                return f"📝 更新 {order_price:.2f} → {ema_price:.2f}"
-            else:
-                return f"✓ EMA={ema_price:.2f} 订单={order_price:.2f}"
+                return f"📌 新建订单 @ {ema_price:.4f}"
         
-        else:
-            # 订单不存在
-            if binance_order_id is not None:
-                # 之前有订单ID，现在没了 -> 判断是成交还是被取消
-                order_status = self.client.get_order_status(symbol, binance_order_id)
-                
-                if order_status and order_status.get('status') == 'FILLED':
-                    # 订单已成交
-                    avg_price = float(order_status.get('avgPrice', 0))
-                    message = (
-                        f"🎉 *订单已成交!*\n\n"
-                        f"📌 ID: `{order_id}`\n"
-                        f"💱 交易对: {symbol}\n"
-                        f"🎯 方向: {side}\n"
-                        f"📦 数量: {quantity}\n"
-                        f"💵 成交价: `{avg_price:,.2f}`\n"
-                        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                    send_telegram_message(message)
-                    OrderManager.remove_order(order_id)
-                    return "🎉 已成交，停止追踪"
-                
-                elif order_status and order_status.get('status') == 'CANCELED':
-                    # 订单被手动取消
-                    message = (
-                        f"🚫 *订单已被手动取消*\n\n"
-                        f"📌 ID: `{order_id}`\n"
-                        f"💱 交易对: {symbol}\n"
-                        f"📊 周期: {interval} | EMA{ema_period}\n"
-                        f"🎯 方向: {side}\n\n"
-                        f"已自动停止追踪此订单\n"
-                        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                    send_telegram_message(message)
-                    OrderManager.remove_order(order_id)
-                    return "🚫 已取消，停止追踪"
-                
-                else:
-                    # 其他情况
-                    status = order_status.get('status', '未知') if order_status else '未知'
-                    message = (
-                        f"⚠️ *订单已失效*\n\n"
-                        f"📌 ID: `{order_id}`\n"
-                        f"💱 交易对: {symbol}\n"
-                        f"状态: {status}\n\n"
-                        f"已自动停止追踪此订单\n"
-                        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                    send_telegram_message(message)
-                    OrderManager.remove_order(order_id)
-                    return "⚠️ 已失效，停止追踪"
-            
-            # 首次下单
-            new_order = self.client.create_order(symbol, side, ema_price, quantity)
-            OrderManager.update_binance_order_id(order_id, new_order['orderId'])
-            
-            message = (
-                f"📌 *新订单已创建*\n\n"
-                f"📌 ID: `{order_id}`\n"
-                f"💱 交易对: {symbol}\n"
-                f"📊 周期: {interval} | EMA{ema_period}\n"
-                f"🎯 方向: {side}\n"
-                f"📦 数量: {quantity}\n"
-                f"💵 挂单价: `{ema_price:,.2f}`\n"
-                f"💰 当前价: `{current_price:,.2f}`\n"
-                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            send_telegram_message(message)
-            
-            return f"📌 新建订单 @ {ema_price:.2f}"
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ 处理订单 {order_id} 出错: {error_msg}")
+            return f"❌ 错误: {error_msg[:50]}"
     
     def run(self, check_interval: int = 60):
         """主循环"""
