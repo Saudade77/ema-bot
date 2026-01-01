@@ -378,67 +378,46 @@ class EMATrailingBot:
                 price_diff = abs(order_price - ema_price) / ema_price
                 
                 if price_diff > self.price_threshold:
-                    # === 关键修复：先创建新订单，成功后再取消旧订单 ===
+                    # === 修改：先取消旧订单，再下新订单 ===
                     try:
                         print(f"🔄 准备更新订单 {order_id}")
                         print(f"   旧价格: {order_price:.4f}, 新价格: {ema_price:.4f}")
                         print(f"   交易对: {symbol}, 方向: {side}, 数量: {quantity}")
                         
-                        # 检查余额
-                        try:
-                            balance = self.client.get_account_balance()
-                            usdt_balance = balance.get('USDT', 0)
-                            estimated_cost = ema_price * quantity
-                            print(f"   账户余额: {usdt_balance:.2f} USDT")
-                            print(f"   预估花费: {estimated_cost:.2f} USDT")
-                            
-                            if usdt_balance < estimated_cost * 1.1:  # 预留10%手续费
-                                error_msg = f"余额不足！需要 {estimated_cost:.2f} USDT，可用 {usdt_balance:.2f} USDT"
-                                print(f"❌ {error_msg}")
-                                send_telegram_message(
-                                    f"⚠️ *余额不足，无法更新订单*\n\n"
-                                    f"ID: `{order_id}`\n"
-                                    f"需要: {estimated_cost:.2f} USDT\n"
-                                    f"可用: {usdt_balance:.2f} USDT"
-                                )
-                                return f"❌ 余额不足"
-                        except Exception as balance_err:
-                            print(f"⚠️ 检查余额失败: {balance_err}")
-                        
-                        # 1. 先创建新订单
-                        print(f"   开始创建新订单...")
-                        new_order = self.client.create_order(symbol, side, ema_price, quantity)
-                        new_order_id = new_order['orderId']
-                        print(f"✅ 新订单创建成功: {new_order_id}")
-                        
-                        # 2. 新订单成功后，取消旧订单
+                        # 1. 先取消旧订单
+                        print(f"   正在取消旧订单 {binance_order_id}...")
                         try:
                             self.client.cancel_order(symbol, binance_order_id)
                             print(f"✅ 旧订单已取消: {binance_order_id}")
                         except Exception as cancel_err:
-                            print(f"⚠️ 取消旧订单失败（可能已成交）: {cancel_err}")
-                            # 如果旧订单取消失败（可能已成交），需要取消新订单
-                            try:
-                                self.client.cancel_order(symbol, new_order_id)
-                                print(f"⚠️ 已取消新订单避免重复: {new_order_id}")
-                            except:
-                                pass
+                            error_str = str(cancel_err)
+                            print(f"⚠️ 取消旧订单失败: {error_str}")
                             
-                            # 检查旧订单状态
-                            old_status = self.client.get_order_status(symbol, binance_order_id)
-                            if old_status and old_status.get('status') == 'FILLED':
-                                OrderManager.remove_order(order_id)
-                                send_telegram_message(
-                                    f"🎉 *订单已成交*\n\n"
-                                    f"ID: `{order_id}`\n"
-                                    f"价格: {order_price:.4f}\n"
-                                    f"注意: 更新过程中旧订单已成交"
-                                )
-                                return "🎉 旧订单已成交"
+                            # 检查是否是"订单不存在"错误（可能已成交）
+                            if "Unknown order" in error_str or "-2011" in error_str:
+                                # 订单已不存在，检查是否已成交
+                                old_status = self.client.get_order_status(symbol, binance_order_id)
+                                if old_status and old_status.get('status') == 'FILLED':
+                                    OrderManager.remove_order(order_id)
+                                    send_telegram_message(
+                                        f"🎉 *订单已成交*\n\n"
+                                        f"ID: `{order_id}`\n"
+                                        f"成交价: {float(old_status.get('avgPrice', 0)):,.4f}"
+                                    )
+                                    return "🎉 订单已成交"
                             
-                            return f"⚠️ 更新失败，保持原订单"
+                            return f"⚠️ 取消旧订单失败: {error_str[:50]}"
                         
-                        # 3. 更新本地记录
+                        # 2. 短暂等待确保取消生效
+                        time.sleep(0.5)
+                        
+                        # 3. 创建新订单
+                        print(f"   正在创建新订单...")
+                        new_order = self.client.create_order(symbol, side, ema_price, quantity)
+                        new_order_id = new_order['orderId']
+                        print(f"✅ 新订单创建成功: {new_order_id}")
+                        
+                        # 4. 更新本地记录
                         OrderManager.update_binance_order_id(order_id, new_order_id)
                         
                         diff_percent = ((ema_price - order_price) / order_price) * 100
@@ -467,13 +446,18 @@ class EMATrailingBot:
                         error_msg = str(update_err)
                         print(f"❌ 更新订单失败: {error_msg}")
                         
-                        # 发送详细错误通知
+                        # 如果新订单创建失败，旧订单已经取消了
+                        # 需要尝试重新下单或通知用户
                         send_telegram_message(
                             f"⚠️ *订单更新失败*\n\n"
                             f"ID: `{order_id}`\n"
                             f"错误: {error_msg[:300]}\n\n"
-                            f"旧订单保持不变: {binance_order_id}"
+                            f"⚠️ 旧订单已取消，新订单创建失败！\n"
+                            f"请手动检查仓位"
                         )
+                        
+                        # 清除本地的 binance_order_id，下次循环会重新下单
+                        OrderManager.update_binance_order_id(order_id, None)
                         
                         return f"❌ 更新失败: {error_msg[:50]}"
                 else:
@@ -502,37 +486,20 @@ class EMATrailingBot:
                         return "🎉 已成交，停止追踪"
                     
                     elif order_status and order_status.get('status') == 'CANCELED':
-                        # 订单被手动取消
-                        message = (
-                            f"🚫 *订单已被取消*\n\n"
-                            f"📌 ID: `{order_id}`\n"
-                            f"💱 交易对: {symbol}\n"
-                            f"📊 周期: {interval} | EMA{ema_period}\n"
-                            f"🎯 方向: {side}\n\n"
-                            f"已自动停止追踪此订单\n"
-                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                        )
-                        send_telegram_message(message)
-                        OrderManager.remove_order(order_id)
-                        return "🚫 已取消，停止追踪"
+                        # 订单被取消，重新下单
+                        print(f"📌 订单被取消，重新下单 {order_id}")
+                    
+                    elif order_status and order_status.get('status') == 'EXPIRED':
+                        # 订单已过期，重新下单
+                        print(f"📌 订单已过期，重新下单 {order_id}")
                     
                     else:
-                        # 其他情况
+                        # 其他情况，尝试重新下单
                         status = order_status.get('status', '未知') if order_status else '未知'
-                        message = (
-                            f"⚠️ *订单已失效*\n\n"
-                            f"📌 ID: `{order_id}`\n"
-                            f"💱 交易对: {symbol}\n"
-                            f"状态: {status}\n\n"
-                            f"已自动停止追踪此订单\n"
-                            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                        )
-                        send_telegram_message(message)
-                        OrderManager.remove_order(order_id)
-                        return "⚠️ 已失效，停止追踪"
+                        print(f"📌 订单状态: {status}，尝试重新下单 {order_id}")
                 
-                # 首次下单
-                print(f"📌 首次创建订单 {order_id}")
+                # 首次下单或重新下单
+                print(f"📌 创建订单 {order_id}")
                 new_order = self.client.create_order(symbol, side, ema_price, quantity)
                 OrderManager.update_binance_order_id(order_id, new_order['orderId'])
                 
