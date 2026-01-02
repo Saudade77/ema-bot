@@ -73,7 +73,8 @@ class OrderManager:
             json.dump(orders, f, indent=2, ensure_ascii=False)
     
     @staticmethod
-    def add_order(symbol: str, interval: str, ema: int, side: str, quantity: float) -> dict:
+    def add_order(symbol: str, interval: str, ema: int, side: str, quantity: float, 
+                  leverage: int = None, margin_type: str = None) -> dict:
         """添加新订单追踪"""
         orders = OrderManager.load_orders()
         
@@ -105,7 +106,10 @@ class OrderManager:
             'quantity': quantity,
             'binance_order_id': None,
             'status': 'active',
-            'created_at': datetime.now().isoformat()
+            'created_at': datetime.now().isoformat(),
+            'leverage': leverage,
+            'margin_type': margin_type,
+            'notified_error': False  # 是否已通知过错误
         }
         
         orders.append(new_order)
@@ -128,24 +132,25 @@ class OrderManager:
         return OrderManager.load_orders()
     
     @staticmethod
-    def update_binance_order_id(order_id: str, binance_order_id: int):
-        """更新币安订单ID"""
+    def update_order(order_id: str, **kwargs):
+        """更新订单信息"""
         orders = OrderManager.load_orders()
         for o in orders:
             if o['id'] == order_id:
-                o['binance_order_id'] = binance_order_id
+                for key, value in kwargs.items():
+                    o[key] = value
                 break
         OrderManager.save_orders(orders)
     
     @staticmethod
-    def mark_order_error(order_id: str, has_error: bool):
-        """标记订单是否有错误（用于避免重复通知）"""
-        orders = OrderManager.load_orders()
-        for o in orders:
-            if o['id'] == order_id:
-                o['has_error'] = has_error
-                break
-        OrderManager.save_orders(orders)
+    def update_binance_order_id(order_id: str, binance_order_id: int):
+        """更新币安订单ID"""
+        OrderManager.update_order(order_id, binance_order_id=binance_order_id)
+    
+    @staticmethod
+    def set_notified(order_id: str, notified: bool):
+        """设置是否已通知"""
+        OrderManager.update_order(order_id, notified_error=notified)
 
 
 class BinanceClient:
@@ -156,7 +161,6 @@ class BinanceClient:
         if not self.api_key or not self.api_secret:
             raise ValueError("API_KEY 或 API_SECRET 未配置")
         
-        # 去除可能的空格和换行
         self.api_key = self.api_key.strip()
         self.api_secret = self.api_secret.strip()
         
@@ -170,7 +174,6 @@ class BinanceClient:
         self.time_offset = 0
         self._sync_time()
         
-        # 缓存交易对信息
         self._exchange_info = None
     
     def _sync_time(self):
@@ -315,12 +318,91 @@ class BinanceClient:
                 break
         return balances
 
-    def create_order(self, symbol: str, side: str, price: float, quantity: float):
-        """下合约限价单"""
+    def get_position_mode(self) -> bool:
+        """获取持仓模式 (True=双向持仓, False=单向持仓)"""
+        url = f"{self.base_url}/fapi/v1/positionSide/dual"
+        query_string = self._sign({})
+        resp = self.session.get(f"{url}?{query_string}")
+        resp.raise_for_status()
+        return resp.json().get('dualSidePosition', False)
+
+    def get_leverage(self, symbol: str) -> int:
+        """获取交易对当前杠杆倍数"""
+        url = f"{self.base_url}/fapi/v2/positionRisk"
+        query_string = self._sign({'symbol': symbol})
+        resp = self.session.get(f"{url}?{query_string}")
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            return int(data[0].get('leverage', 20))
+        return 20
+
+    def set_leverage(self, symbol: str, leverage: int):
+        """设置杠杆倍数"""
+        url = f"{self.base_url}/fapi/v1/leverage"
+        params = {
+            'symbol': symbol,
+            'leverage': leverage
+        }
+        query_string = self._sign(params)
+        resp = self.session.post(f"{url}?{query_string}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_margin_type(self, symbol: str) -> str:
+        """获取保证金模式 (ISOLATED=逐仓, CROSSED=全仓)"""
+        url = f"{self.base_url}/fapi/v2/positionRisk"
+        query_string = self._sign({'symbol': symbol})
+        resp = self.session.get(f"{url}?{query_string}")
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            return data[0].get('marginType', 'cross').upper()
+        return 'CROSS'
+
+    def set_margin_type(self, symbol: str, margin_type: str):
+        """设置保证金模式 (ISOLATED=逐仓, CROSSED=全仓)"""
+        url = f"{self.base_url}/fapi/v1/marginType"
+        params = {
+            'symbol': symbol,
+            'marginType': margin_type.upper()
+        }
+        query_string = self._sign(params)
+        resp = self.session.post(f"{url}?{query_string}")
+        # 如果已经是该模式，会返回错误，忽略
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+
+    def create_order(self, symbol: str, side: str, price: float, quantity: float,
+                     leverage: int = None, margin_type: str = None):
+        """下合约限价单（确保杠杆和保证金模式正确）"""
+        
+        # 如果指定了杠杆，先设置杠杆
+        if leverage:
+            try:
+                current_leverage = self.get_leverage(symbol)
+                if current_leverage != leverage:
+                    self.set_leverage(symbol, leverage)
+                    print(f"   ✅ 杠杆已设置为 {leverage}x")
+            except Exception as e:
+                print(f"   ⚠️ 设置杠杆失败: {e}")
+        
+        # 如果指定了保证金模式，先设置
+        if margin_type:
+            try:
+                current_margin = self.get_margin_type(symbol)
+                target_margin = 'ISOLATED' if margin_type.upper() in ['ISOLATED', '逐仓'] else 'CROSSED'
+                if current_margin != target_margin:
+                    self.set_margin_type(symbol, target_margin)
+                    print(f"   ✅ 保证金模式已设置为 {target_margin}")
+            except Exception as e:
+                print(f"   ⚠️ 设置保证金模式失败: {e}")
+        
         price_str = self.format_price(symbol, price)
         quantity_str = self.format_quantity(symbol, quantity)
         
-        print(f"📝 下单参数: {symbol} {side} 价格={price_str} 数量={quantity_str}")
+        print(f"📝 下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
         
         url = f"{self.base_url}/fapi/v1/order"
         params = {
@@ -333,7 +415,6 @@ class BinanceClient:
         }
         query_string = self._sign(params)
         
-        # 使用 query string 方式发送 POST 请求
         resp = self.session.post(f"{url}?{query_string}")
         
         if resp.status_code != 200:
@@ -372,16 +453,14 @@ class EMATrailingBot:
         quantity = order_config['quantity']
         binance_order_id = order_config.get('binance_order_id')
         order_id = order_config['id']
-        has_error = order_config.get('has_error', False)  # 是否已经报过错
+        notified = order_config.get('notified_error', False)
+        leverage = order_config.get('leverage')
+        margin_type = order_config.get('margin_type')
         
         try:
-            # 计算当前EMA
             ema_price = self.client.calculate_ema(symbol, ema_period, interval)
-            
-            # 获取当前价格
             current_price = self.client.get_current_price(symbol)
             
-            # 检查币安订单状态
             open_orders = self.client.get_open_orders(symbol)
             our_order = None
             
@@ -392,24 +471,18 @@ class EMATrailingBot:
                         break
             
             if our_order:
-                # 订单存在，检查是否需要更新
                 order_price = float(our_order['price'])
                 price_diff = abs(order_price - ema_price) / ema_price
                 
                 if price_diff > self.price_threshold:
-                    # === 先取消旧订单，再下新订单 ===
-                    print(f"🔄 准备更新订单 {order_id}")
-                    print(f"   旧价格: {order_price:.4f}, 新价格: {ema_price:.4f}")
+                    print(f"🔄 更新订单 {order_id}: {order_price:.4f} → {ema_price:.4f}")
                     
-                    # 1. 先取消旧订单
-                    print(f"   正在取消旧订单 {binance_order_id}...")
+                    # 1. 取消旧订单
                     try:
                         self.client.cancel_order(symbol, binance_order_id)
-                        print(f"✅ 旧订单已取消: {binance_order_id}")
+                        print(f"   ✅ 旧订单已取消")
                     except Exception as cancel_err:
                         error_str = str(cancel_err)
-                        print(f"⚠️ 取消旧订单失败: {error_str}")
-                        
                         if "Unknown order" in error_str or "-2011" in error_str:
                             old_status = self.client.get_order_status(symbol, binance_order_id)
                             if old_status and old_status.get('status') == 'FILLED':
@@ -419,67 +492,55 @@ class EMATrailingBot:
                                     f"ID: `{order_id}`\n"
                                     f"成交价: {float(old_status.get('avgPrice', 0)):,.4f}"
                                 )
-                                return "🎉 订单已成交"
-                        
+                                return "🎉 已成交"
                         return f"⚠️ 取消失败"
                     
-                    # 2. 等待
                     time.sleep(0.3)
                     
-                    # 3. 创建新订单
-                    print(f"   正在创建新订单...")
+                    # 2. 创建新订单（带杠杆和保证金模式）
                     try:
-                        new_order = self.client.create_order(symbol, side, ema_price, quantity)
+                        new_order = self.client.create_order(
+                            symbol, side, ema_price, quantity,
+                            leverage=leverage, margin_type=margin_type
+                        )
                         new_order_id = new_order['orderId']
-                        print(f"✅ 新订单创建成功: {new_order_id}")
                         
-                        # 更新本地记录，清除错误标记
-                        OrderManager.update_binance_order_id(order_id, new_order_id)
-                        OrderManager.mark_order_error(order_id, False)
+                        OrderManager.update_order(order_id, 
+                            binance_order_id=new_order_id, 
+                            notified_error=False
+                        )
                         
                         diff_percent = ((ema_price - order_price) / order_price) * 100
                         direction = "↑" if diff_percent > 0 else "↓"
                         
-                        message = (
+                        send_telegram_message(
                             f"🔄 *订单已更新*\n\n"
-                            f"📌 ID: `{order_id}`\n"
-                            f"💱 交易对: {symbol}\n"
-                            f"📊 周期: {interval} | EMA{ema_period}\n"
-                            f"🎯 方向: {side}\n"
-                            f"📦 数量: {quantity}\n\n"
-                            f"💰 当前价格: `{current_price:,.4f}`\n"
-                            f"━━━━━━━━━━━━━━━\n"
-                            f"❌ 旧订单: @ {order_price:,.4f}\n"
-                            f"✅ 新订单: @ {ema_price:,.4f}\n"
-                            f"📈 变动: {direction} {abs(diff_percent):.2f}%"
+                            f"ID: `{order_id}`\n"
+                            f"旧价格: {order_price:,.2f}\n"
+                            f"新价格: {ema_price:,.2f}\n"
+                            f"变动: {direction} {abs(diff_percent):.2f}%"
                         )
-                        send_telegram_message(message)
                         
-                        return f"📝 更新成功 {order_price:.4f} → {ema_price:.4f}"
+                        return f"📝 更新 {order_price:.2f}→{ema_price:.2f}"
                     
                     except Exception as create_err:
                         error_msg = str(create_err)
-                        print(f"❌ 创建新订单失败: {error_msg}")
+                        print(f"   ❌ 创建失败: {error_msg}")
                         
-                        # 只在第一次出错时发送通知
-                        if not has_error:
+                        if not notified:
                             send_telegram_message(
                                 f"⚠️ *订单更新失败*\n\n"
                                 f"ID: `{order_id}`\n"
-                                f"旧订单已取消，新订单创建失败\n"
-                                f"错误: {error_msg[:200]}\n\n"
-                                f"请手动检查仓位"
+                                f"原因: {error_msg[:150]}\n"
+                                f"请手动检查"
                             )
-                            OrderManager.mark_order_error(order_id, True)
+                            OrderManager.set_notified(order_id, True)
                         
-                        # 清除 binance_order_id，下次会重新下单
                         OrderManager.update_binance_order_id(order_id, None)
-                        
                         return f"❌ 创建失败"
                 else:
-                    # 清除错误标记（订单正常）
-                    if has_error:
-                        OrderManager.mark_order_error(order_id, False)
+                    if notified:
+                        OrderManager.set_notified(order_id, False)
                     return f"✓ 差异{price_diff*100:.2f}%"
             
             else:
@@ -489,104 +550,73 @@ class EMATrailingBot:
                     
                     if order_status and order_status.get('status') == 'FILLED':
                         avg_price = float(order_status.get('avgPrice', 0))
-                        message = (
+                        send_telegram_message(
                             f"🎉 *订单已成交!*\n\n"
-                            f"📌 ID: `{order_id}`\n"
-                            f"💱 交易对: {symbol}\n"
-                            f"🎯 方向: {side}\n"
-                            f"📦 数量: {quantity}\n"
-                            f"💵 成交价: `{avg_price:,.4f}`"
+                            f"ID: `{order_id}`\n"
+                            f"成交价: `{avg_price:,.4f}`"
                         )
-                        send_telegram_message(message)
                         OrderManager.remove_order(order_id)
                         return "🎉 已成交"
                     
-                    elif order_status and order_status.get('status') in ['CANCELED', 'EXPIRED']:
-                        print(f"📌 订单已取消/过期，重新下单 {order_id}")
-                    else:
-                        status = order_status.get('status', '未知') if order_status else '未知'
-                        print(f"📌 订单状态: {status}，重新下单 {order_id}")
+                    print(f"📌 订单不存在，重新创建 {order_id}")
                 
                 # 创建新订单
-                print(f"📌 创建订单 {order_id}")
                 try:
-                    new_order = self.client.create_order(symbol, side, ema_price, quantity)
-                    OrderManager.update_binance_order_id(order_id, new_order['orderId'])
-                    OrderManager.mark_order_error(order_id, False)
-                    
-                    message = (
-                        f"📌 *新订单已创建*\n\n"
-                        f"📌 ID: `{order_id}`\n"
-                        f"💱 交易对: {symbol}\n"
-                        f"📊 周期: {interval} | EMA{ema_period}\n"
-                        f"🎯 方向: {side}\n"
-                        f"📦 数量: {quantity}\n"
-                        f"💵 挂单价: `{ema_price:,.4f}`\n"
-                        f"💰 当前价: `{current_price:,.4f}`"
+                    new_order = self.client.create_order(
+                        symbol, side, ema_price, quantity,
+                        leverage=leverage, margin_type=margin_type
                     )
-                    send_telegram_message(message)
+                    OrderManager.update_order(order_id,
+                        binance_order_id=new_order['orderId'],
+                        notified_error=False
+                    )
                     
-                    return f"📌 新建 @ {ema_price:.4f}"
+                    send_telegram_message(
+                        f"📌 *新订单已创建*\n\n"
+                        f"ID: `{order_id}`\n"
+                        f"挂单价: `{ema_price:,.2f}`\n"
+                        f"当前价: `{current_price:,.2f}`"
+                    )
+                    
+                    return f"📌 新建 @ {ema_price:.2f}"
                 
                 except Exception as create_err:
                     error_msg = str(create_err)
-                    print(f"❌ 创建订单失败: {error_msg}")
+                    print(f"❌ 创建失败: {error_msg}")
                     
-                    # 只在第一次出错时发送通知
-                    if not has_error:
+                    if not notified:
                         send_telegram_message(
                             f"⚠️ *创建订单失败*\n\n"
                             f"ID: `{order_id}`\n"
-                            f"错误: {error_msg[:200]}\n\n"
-                            f"请检查账户状态"
+                            f"原因: {error_msg[:150]}"
                         )
-                        OrderManager.mark_order_error(order_id, True)
+                        OrderManager.set_notified(order_id, True)
                     
                     return f"❌ 创建失败"
         
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ 处理订单 {order_id} 出错: {error_msg}")
+            print(f"❌ 处理 {order_id} 出错: {error_msg}")
             
-            # 只在第一次出错时发送通知
-            if not has_error:
+            if not notified:
                 send_telegram_message(
-                    f"⚠️ *订单处理错误*\n\n"
+                    f"⚠️ *处理错误*\n\n"
                     f"ID: `{order_id}`\n"
-                    f"错误: {error_msg[:200]}"
+                    f"错误: {error_msg[:150]}"
                 )
-                OrderManager.mark_order_error(order_id, True)
+                OrderManager.set_notified(order_id, True)
             
             return f"❌ 错误"
     
     def run(self, check_interval: int = 60):
         """主循环"""
-        print("=" * 60)
-        print("🚀 EMA多订单追踪机器人启动")
-        print("=" * 60)
+        print("=" * 50)
+        print("🚀 EMA追踪机器人启动")
         print(f"   检查间隔: {check_interval}秒")
-        print(f"   更新阈值: {self.price_threshold * 100}%")
-        print(f"   Telegram通知: {'✅ 已启用' if TELEGRAM_TOKEN else '❌ 未配置'}")
-        print("=" * 60)
+        print("=" * 50)
         
         if TELEGRAM_TOKEN:
-            send_telegram_message(
-                f"🚀 *EMA追踪机器人已启动*\n\n"
-                f"⏱️ 检查间隔: {check_interval}秒\n"
-                f"📊 更新阈值: {self.price_threshold * 100}%"
-            )
-        
-        try:
-            balances = self.client.get_account_balance()
-            print("💰 账户余额:")
-            for asset, amount in balances.items():
-                if amount > 0.0001:
-                    print(f"   {asset}: {amount}")
-        except Exception as e:
-            print(f"⚠️ 无法获取余额: {e}")
-        
-        print("\n按 Ctrl+C 停止机器人")
-        print("-" * 60)
+            send_telegram_message(f"🚀 *EMA追踪机器人已启动*\n\n每{check_interval}秒检查一次订单")
         
         while True:
             try:
@@ -594,95 +624,52 @@ class EMATrailingBot:
                 active_orders = [o for o in orders if o.get('status') == 'active']
                 
                 if not active_orders:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 暂无追踪订单")
                     time.sleep(check_interval)
                     continue
                 
-                current_time = datetime.now().strftime('%H:%M:%S')
-                print(f"\n[{current_time}] 处理 {len(active_orders)} 个订单")
+                print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 处理 {len(active_orders)} 个订单")
                 
                 for order in active_orders:
                     result = self.process_order(order)
                     print(f"  {order['id']}: {result}")
                 
             except KeyboardInterrupt:
-                print("\n\n⏹️ 用户停止机器人")
+                print("\n⏹️ 停止")
                 if TELEGRAM_TOKEN:
-                    send_telegram_message("⏹️ *EMA追踪机器人已停止*")
+                    send_telegram_message("⏹️ *机器人已停止*")
                 break
-            
             except Exception as e:
-                print(f"❌ 主循环错误: {e}")
+                print(f"❌ 错误: {e}")
             
             time.sleep(check_interval)
 
 
 def print_help():
-    """打印帮助信息"""
     print("""
-╔══════════════════════════════════════════════════════════════╗
-║              EMA追踪限价单机器人 - 使用说明                    ║
-╠══════════════════════════════════════════════════════════════╣
-║  运行机器人:                                                  ║
-║    python ema_bot.py run                                     ║
-║                                                              ║
-║  添加订单:                                                    ║
-║    python ema_bot.py add <币种> <周期> <EMA> <方向> <数量>     ║
-║    例: python ema_bot.py add BTC 4h 21 BUY 0.001             ║
-║                                                              ║
-║  查看订单:                                                    ║
-║    python ema_bot.py list                                    ║
-║                                                              ║
-║  删除订单:                                                    ║
-║    python ema_bot.py remove <订单ID>                         ║
-║                                                              ║
-║  查看当前EMA值:                                               ║
-║    python ema_bot.py ema <币种> <周期>                        ║
-║                                                              ║
-╠══════════════════════════════════════════════════════════════╣
-║  支持的周期: 15m, 1h, 4h, 1d, 1w, 1M                          ║
-║  支持的EMA: 21, 55, 100, 200                                 ║
-║  方向: BUY(做多入场) / SELL(做空入场)                          ║
-╚══════════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════╗
+║         EMA追踪限价单机器人 - 使用说明             ║
+╠═══════════════════════════════════════════════════╣
+║  python ema_bot.py run      # 运行机器人          ║
+║  python ema_bot.py list     # 查看订单            ║
+║  python ema_bot.py remove <ID>  # 删除订单        ║
+║  python ema_bot.py ema <币种> <周期>  # 查看EMA   ║
+╚═══════════════════════════════════════════════════╝
 """)
-
-
-def cmd_add(args):
-    if len(args) < 5:
-        print("用法: python ema_bot.py add <币种> <周期> <EMA> <方向> <数量>")
-        return
-    
-    symbol, interval, ema, side, quantity = args[0], args[1], int(args[2]), args[3], float(args[4])
-    
-    try:
-        order = OrderManager.add_order(symbol, interval, ema, side, quantity)
-        print(f"✅ 订单添加成功!")
-        print(f"   ID: {order['id']}")
-        print(f"   交易对: {order['symbol']}")
-        print(f"   周期: {order['interval']}")
-        print(f"   EMA: {order['ema']}")
-        print(f"   方向: {order['side']}")
-        print(f"   数量: {order['quantity']}")
-    except Exception as e:
-        print(f"❌ 添加失败: {e}")
 
 
 def cmd_list(args):
     orders = OrderManager.list_orders()
-    
     if not orders:
         print("暂无订单")
         return
     
-    print(f"\n{'='*70}")
-    print(f"{'ID':<35} {'方向':<6} {'数量':<12} {'状态':<8}")
-    print(f"{'='*70}")
-    
+    print(f"\n{'ID':<35} {'方向':<5} {'数量':<10} {'杠杆':<6} {'模式':<8}")
+    print("=" * 70)
     for o in orders:
-        print(f"{o['id']:<35} {o['side']:<6} {o['quantity']:<12} {o['status']:<8}")
-    
-    print(f"{'='*70}")
-    print(f"共 {len(orders)} 个订单\n")
+        leverage = o.get('leverage', '-')
+        margin = o.get('margin_type', '-')
+        print(f"{o['id']:<35} {o['side']:<5} {o['quantity']:<10} {leverage}x    {margin}")
+    print(f"\n共 {len(orders)} 个订单")
 
 
 def cmd_remove(args):
@@ -691,21 +678,21 @@ def cmd_remove(args):
         return
     
     order_id = args[0]
-    
     orders = OrderManager.load_orders()
+    
     for o in orders:
         if o['id'] == order_id and o.get('binance_order_id'):
             try:
                 client = BinanceClient()
                 client.cancel_order(o['symbol'], o['binance_order_id'])
-                print(f"✅ 已取消币安订单 {o['binance_order_id']}")
-            except Exception as e:
-                print(f"⚠️ 取消币安订单失败: {e}")
+                print(f"✅ 已取消币安订单")
+            except:
+                pass
     
     if OrderManager.remove_order(order_id):
-        print(f"✅ 已删除订单: {order_id}")
+        print(f"✅ 已删除: {order_id}")
     else:
-        print(f"❌ 订单不存在: {order_id}")
+        print(f"❌ 订单不存在")
 
 
 def cmd_ema(args):
@@ -722,16 +709,13 @@ def cmd_ema(args):
     client = BinanceClient()
     current_price = client.get_current_price(symbol)
     
-    print(f"\n{symbol} ({interval}) 当前价格: {current_price}")
-    print("-" * 40)
+    print(f"\n{symbol} ({interval}) 当前: {current_price:.2f}")
+    print("-" * 35)
     
     for ema in SUPPORTED_EMA:
         ema_value = client.calculate_ema(symbol, ema, interval)
         diff = ((current_price - ema_value) / ema_value) * 100
-        direction = "↑" if diff > 0 else "↓"
-        print(f"  EMA{ema:<3}: {ema_value:>12.2f}  ({direction} {abs(diff):.2f}%)")
-    
-    print()
+        print(f"  EMA{ema:<3}: {ema_value:>10.2f}  ({diff:+.2f}%)")
 
 
 def main():
@@ -739,31 +723,20 @@ def main():
         print_help()
         return
     
-    command = sys.argv[1].lower()
+    cmd = sys.argv[1].lower()
     args = sys.argv[2:]
     
-    if command == 'run':
+    if cmd == 'run':
         bot = EMATrailingBot()
-        check_interval = int(args[0]) if args else 60
-        bot.run(check_interval)
-    
-    elif command == 'add':
-        cmd_add(args)
-    
-    elif command == 'list':
+        interval = int(args[0]) if args else 60
+        bot.run(interval)
+    elif cmd == 'list':
         cmd_list(args)
-    
-    elif command == 'remove':
+    elif cmd == 'remove':
         cmd_remove(args)
-    
-    elif command == 'ema':
+    elif cmd == 'ema':
         cmd_ema(args)
-    
-    elif command in ['help', '-h', '--help']:
-        print_help()
-    
     else:
-        print(f"未知命令: {command}")
         print_help()
 
 
