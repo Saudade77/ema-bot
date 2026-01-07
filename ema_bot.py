@@ -265,13 +265,19 @@ class BinanceClient:
         return float(resp.json()['price'])
 
     def calculate_ema(self, symbol: str, period: int, interval: str) -> float:
-        """计算合约 EMA"""
+        """计算合约 EMA（基于已完成K线）"""
         url = f"{self.base_url}/fapi/v1/klines"
-        limit = period + 10
+        # 获取更多数据用于EMA预热，提高准确性
+        limit = max(period * 3, 200)
         params = {'symbol': symbol, 'interval': interval, 'limit': limit}
         resp = self.session.get(url, params=params)
         resp.raise_for_status()
         klines = resp.json()
+        
+        # 关键修改：排除最后一根未完成的K线
+        # 币安返回的最后一根K线是当前正在形成的K线，收盘价会实时变化
+        if len(klines) > 1:
+            klines = klines[:-1]
         
         closes = [float(k[4]) for k in klines]
         if len(closes) < period:
