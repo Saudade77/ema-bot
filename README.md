@@ -26,7 +26,7 @@ Automatically monitors market signals and manages limit orders to implement a "f
 
 ## 📁 Project Structure
 
-
+```bash
 emaBot/
 ├── .env                 # Environment configuration
 ├── ema_bot.py          # Core logic (EMA calculation, order management)
@@ -34,7 +34,7 @@ emaBot/
 ├── orders.json         # Order configuration (auto-generated)
 ├── README.md           # English Documentation
 └── README_CN.md        # Chinese Documentation
-
+```
 ---
 
 ## 🚀 Quick Start
@@ -44,43 +44,61 @@ emaBot/
 ```bash
 git clone https://github.com/yourusername/ema-trading-bot.git
 cd ema-trading-bot
+```
 
-2. Install Dependencies
-bashDownloadCopy codepip install python-dotenv requests pandas python-telegram-bot
-3. Configure Environment Variables
+### 2. Install Dependencies
+```bash
+pip install python-dotenv requests pandas python-telegram-bot
+```
+
+### 3. Configure Environment Variables
 Create a .env file:
-envDownloadCopy code# Binance API (Futures trading permission required)
+```bash
+# Binance API (Futures trading permission required)
 API_KEY=your_api_key
 API_SECRET=your_api_secret
 
 # Telegram Bot
 TELEGRAM_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
-Binance API:
+```
 
+#### Binance API:
 1. Log in to Binance
 2. Go to API Management
 3. Create API with "Futures Trading" permission enabled
 4. Recommended: Enable IP whitelist
 
-Telegram Bot:
-
+#### Telegram Bot:
 1. Search for @BotFather on Telegram
 2. Send /newbot to create a bot and get the Token
 3. Search for @userinfobot to get your Chat ID
 
-4. Start the Bot
-bashDownloadCopy code# Option 1: Via Telegram Bot (Recommended)
+### 4. Start the Bot
+```bash
+# Option 1: Via Telegram Bot (Recommended)
 python telegram_bot.py
 
 # Option 2: Command line
 python ema_bot.py run
+```
+## 📱 Telegram Commands
+| Command | Description | Example |
+|---------|-------------|---------|
+| /start | Show help menu | - |
+| /bind [symbol] [interval] [EMA] | Bind existing order to tracking | /bind BTC 4h 21 |
+| /list | View all tracked orders | - |
+| /remove [ID] | Remove tracked order | /remove BTCUSDT_4h_EMA21_BUY |
+| /ema [symbol] [interval] | Query EMA values | /ema ETH 1h |
+| /price [symbol] | Query current price | /price BTC |
+| /balance | Query account balance | - |
+| /status | Bot running status | - |
+| /start_bot | Start tracking | - |
+| /stop_bot | Stop tracking | - |
 
-📱 Telegram Commands
-CommandDescriptionExample/startShow help menu-/bind [symbol] [interval] [EMA]Bind existing order to tracking/bind BTC 4h 21/listView all tracked orders-/remove [ID]Remove tracked order/remove BTCUSDT_4h_EMA21_BUY/ema [symbol] [interval]Query EMA values/ema ETH 1h/price [symbol]Query current price/price BTC/balanceQuery account balance-/statusBot running status-/start_botStart tracking-/stop_botStop tracking-
-
-💻 Command Line Usage
-bashDownloadCopy code# Start tracking (default: check every 60 seconds)
+## 💻 Command Line Usage
+```bash
+# Start tracking (default: check every 60 seconds)
 python ema_bot.py run
 
 # Custom check interval (30 seconds)
@@ -94,8 +112,9 @@ python ema_bot.py remove BTCUSDT_4h_EMA21_BUY
 
 # Query EMA values
 python ema_bot.py ema BTC 4h
+```
 
-📋 Workflow
+## 📋 Workflow
 ┌─────────────────────────────────────┐
 │  1. Place a limit order on Binance  │
 └──────────────────┬──────────────────┘
@@ -117,12 +136,17 @@ python ema_bot.py ema BTC 4h
 └─────────────────────────────────────┘
 
 
-⚙️ Supported Parameters
-TypeSupported ValuesEMA Periods21 / 55 / 100 / 200Timeframes15m / 1h / 4h / 1d / 1w / 1MUpdate Threshold0.3% (configurable via price_threshold)
+## ⚙️ Supported Parameters
+| Type | Supported values | 
+|------|------------------|
+| EMA Periods | 21 / 55 / 100 / 200 |
+| Timeframes | 15m / 1h / 4h / 1d / 1w / 1M |
+| Update Threshold | 0.3% (configurable via price_threshold) |
 
-🔧 Configuration
+## 🔧 Configuration
 Order Configuration File (orders.json)
-jsonDownloadCopy code[
+```bash
+[
   {
     "id": "BTCUSDT_4h_EMA21_BUY",
     "symbol": "BTCUSDT",
@@ -137,6 +161,8 @@ jsonDownloadCopy code[
     "position_side": "LONG"
   }
 ]
+```
+
 Field Description
 FieldDescriptionidUnique identifier (auto-generated)symbolTrading pairintervalKline intervalemaEMA periodsideDirection (BUY/SELL)quantityOrder quantityleverageLeverage multipliermargin_typeMargin mode (CROSSED/ISOLATED)position_sidePosition direction (LONG/SHORT/BOTH)
 
