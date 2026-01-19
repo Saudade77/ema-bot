@@ -1,4 +1,3 @@
-
 # EMA Trailing Trading Bot
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
@@ -42,7 +41,7 @@ emaBot/
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/ema-trading-bot.git
+git clone https://github.com/Saudade77/ema-trading-bot.git
 cd ema-trading-bot
 ```
 
@@ -115,6 +114,7 @@ python ema_bot.py ema BTC 4h
 ```
 
 ## 📋 Workflow
+```bash
 ┌─────────────────────────────────────┐
 │  1. Place a limit order on Binance  │
 └──────────────────┬──────────────────┘
@@ -134,7 +134,7 @@ python ema_bot.py ema BTC 4h
 ┌─────────────────────────────────────┐
 │  5. Auto-remove and notify on fill  │
 └─────────────────────────────────────┘
-
+```
 
 ## ⚙️ Supported Parameters
 | Type | Supported values | 
@@ -144,7 +144,7 @@ python ema_bot.py ema BTC 4h
 | Update Threshold | 0.3% (configurable via price_threshold) |
 
 ## 🔧 Configuration
-Order Configuration File (orders.json)
+### Order Configuration File (orders.json)
 ```bash
 [
   {
@@ -163,10 +163,21 @@ Order Configuration File (orders.json)
 ]
 ```
 
-Field Description
-FieldDescriptionidUnique identifier (auto-generated)symbolTrading pairintervalKline intervalemaEMA periodsideDirection (BUY/SELL)quantityOrder quantityleverageLeverage multipliermargin_typeMargin mode (CROSSED/ISOLATED)position_sidePosition direction (LONG/SHORT/BOTH)
+### Field Description
+| Field | Description |
+|-------|-------------|
+| id | Unique identifier (auto-generated) |
+| symbol | Trading pair | 
+| interval | Kline interval | 
+| ema | EMA period | 
+| side | Direction (BUY/SELL) | 
+| quantity | Order quantity | 
+| leverage | Leverage multiplier |
+| margin_type | Margin mode (CROSSED/ISOLATED) |
+| position_side | Position direction (LONG/SHORT/BOTH) |
 
-🔍 How It Works
+## 🔍 How It Works
+```bash
                     ┌──────────────┐
                     │  Binance API │
                     └──────┬───────┘
@@ -187,25 +198,30 @@ FieldDescriptionidUnique identifier (auto-generated)symbolTrading pairintervalKl
                     ┌──────────────┐
                     │Telegram Alert│
                     └──────────────┘
+```
 
+## ⚠️ Risk Warning
 
-⚠️ Risk Warning
+**⚠️ This project is for educational purposes only. Not financial advice.**
 
-⚠️ This project is for educational purposes only. Not financial advice.
+### ⚠️ Risk Considerations
+1. Futures trading carries high risk and may result in total loss of capital
+2. Test with small amounts first to validate the strategy
+3. Recommended: Test on testnet first
+4. Keep your API Key secure and never share it
+5. Only enable "Futures Trading" permission, never enable "Withdrawal"
 
-⚠️ Risk ConsiderationsFutures trading carries high risk and may result in total loss of capitalTest with small amounts first to validate the strategyRecommended: Test on testnet firstKeep your API Key secure and never share itOnly enable "Futures Trading" permission, never enable "Withdrawal"
+## 🐛 FAQ
+1. Make sure you're using the latest code. The calculate_ema method now excludes incomplete candles.
+2. Server time sync issue. The code handles this automatically. If the problem persists, check your system time.
+3. Ensure position_side (LONG/SHORT) is correctly set when binding. The code automatically detects position mode.
 
-🐛 FAQ
-Make sure you're using the latest code. The calculate_ema method now excludes incomplete candles.
-Server time sync issue. The code handles this automatically. If the problem persists, check your system time.
-Ensure position_side (LONG/SHORT) is correctly set when binding. The code automatically detects position mode.
-
-📄 License
+## 📄 License
 MIT License
 
-🤝 Contributing
+## 🤝 Contributing
 Issues and Pull Requests are welcome!
 
-📮 Contact
+## 📮 Contact
 For questions, please submit an Issue
 
