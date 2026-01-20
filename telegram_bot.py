@@ -107,13 +107,17 @@ async def _cmd_ema_impl(update: Update, context: ContextTypes.DEFAULT_TYPE, mark
         
         for ema in SUPPORTED_EMA:
             val = binance_client.calculate_ema(symbol, ema, interval, market_type)
-            diff = ((price - val) / val) * 100
-            icon = "🟢" if diff > 0 else "🔴"
-            lines.append(f"EMA{ema}: `{val:,.2f}` {icon} {diff:+.2f}%")
+            # ✅ 新增：检查 EMA 是否有效
+            if val == 0 or val is None:
+                lines.append(f"EMA{ema}: 数据不足")
+            else:
+                diff = ((price - val) / val) * 100
+                icon = "🟢" if diff > 0 else "🔴"
+                lines.append(f"EMA{ema}: `{val:,.2f}` {icon} {diff:+.2f}%")
         
         await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
     except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
+        await update.message.reply_text(f"❌ 查询失败: {symbol} 可能不存在")
 
 
 # ==================== 价格查询 ====================

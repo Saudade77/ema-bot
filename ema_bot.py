@@ -308,19 +308,17 @@ class BinanceClient:
 
     # ==================== EMA 计算 ====================
     
-    def calculate_ema(self, symbol: str, period: int, interval: str, market_type: str = 'future') -> float:
-        """
-        计算 EMA（与币安/TradingView 图表一致）
+    def calculate_ema(self, symbol: str, period: int, interval: str, market_type: str = 'futures') -> float:
+        """计算 EMA（与币安/TradingView 图表一致）"""
         
-        使用标准 TA 计算方式：
-        1. 初始 EMA = 前 N 根 K 线收盘价的 SMA
-        2. 之后 EMA = Price × k + EMA(prev) × (1-k), k = 2/(N+1)
-        """
-        base_url = self._get_base_url(market_type)
-        endpoint = "/api/v3/klines" if market_type == 'spot' else "/fapi/v1/klines"
+        if market_type == 'spot':
+            base_url = self.spot_base_url
+            endpoint = "/api/v3/klines"
+        else:
+            base_url = self.futures_base_url
+            endpoint = "/fapi/v1/klines"
+            
         url = f"{base_url}{endpoint}"
-        
-        # 获取足够多的K线进行预热（币安最多返回1500根）
         limit = 1500
         params = {'symbol': symbol, 'interval': interval, 'limit': limit}
         
@@ -332,23 +330,30 @@ class BinanceClient:
             print(f"⚠️ 获取K线失败: {e}")
             return 0.0
         
-        # 排除最后一根未完成的K线（收盘价还在变动）
+        # ✅ 新增：检查是否有数据
+        if not klines or len(klines) == 0:
+            print(f"⚠️ 无K线数据: {symbol}")
+            return 0.0
+        
+        # 排除最后一根未完成的K线
         if len(klines) > 1:
             klines = klines[:-1]
         
         closes = [float(k[4]) for k in klines]
         
+        # ✅ 新增：检查数据是否足够
         if len(closes) < period:
-            print(f"⚠️ K线数据不足: {len(closes)} < {period}")
+            print(f"⚠️ K线数据不足: {symbol} 只有 {len(closes)} 根，需要 {period} 根")
+            return 0.0
+        
+        # ✅ 新增：防止除零
+        if period <= 0:
             return 0.0
         
         # 标准 EMA 计算
         k = 2 / (period + 1)
-        
-        # 初始值：前 period 根的 SMA
         ema = sum(closes[:period]) / period
         
-        # 迭代计算
         for close in closes[period:]:
             ema = close * k + ema * (1 - k)
         
