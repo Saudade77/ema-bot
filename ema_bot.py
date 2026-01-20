@@ -349,229 +349,113 @@ def calculate_ema(self, symbol: str, period: int, interval: str, market_type: st
 
     # ==================== 账户余额 ====================
     
-    def get_account_balance(self, market_type: str = 'futures') -> dict:
-        """获取账户余额"""
-        if market_type == 'spot':
-            url = f"{self.spot_base_url}/api/v3/account"
-            query_string = self._sign({})
-            resp = self.session.get(f"{url}?{query_string}")
-            resp.raise_for_status()
-            data = resp.json()
-            
-            balances = {}
-            for asset in data.get('balances', []):
-                free = float(asset['free'])
-                if free > 0:
-                    balances[asset['asset']] = free
-            return balances
-        else:
-            url = f"{self.futures_base_url}/fapi/v2/balance"
-            query_string = self._sign({})
-            resp = self.session.get(f"{url}?{query_string}")
-            resp.raise_for_status()
-            data = resp.json()
-            
-            balances = {}
-            for asset in data:
-                if asset['asset'] == 'USDT':
-                    balances['USDT'] = float(asset['availableBalance'])
-                    break
-            return balances
-
-    # ==================== 合约特有功能 ====================
-    
-    def get_position_mode(self) -> bool:
-        """获取持仓模式 (True=双向持仓/对冲模式, False=单向持仓)"""
-        if self._position_mode is not None:
-            return self._position_mode
-        
-        url = f"{self.futures_base_url}/fapi/v1/positionSide/dual"
+def get_account_balance(self, market_type: str = 'futures') -> dict:
+    """获取账户余额"""
+    if market_type == 'spot':
+        url = f"{self.spot_base_url}/api/v3/account"
         query_string = self._sign({})
         resp = self.session.get(f"{url}?{query_string}")
         resp.raise_for_status()
-        self._position_mode = resp.json().get('dualSidePosition', False)
+        data = resp.json()
+        
+        balances = {}
+        for asset in data.get('balances', []):
+            free = float(asset['free'])
+            if free > 0:
+                balances[asset['asset']] = free
+        return balances
+    else:
+        url = f"{self.futures_base_url}/fapi/v2/balance"
+        query_string = self._sign({})
+        resp = self.session.get(f"{url}?{query_string}")
+        resp.raise_for_status()
+        data = resp.json()
+        
+        balances = {}
+        for asset in data:
+            if asset['asset'] == 'USDT':
+                balances['USDT'] = float(asset['availableBalance'])
+                break
+        return balances
+
+# ==================== 合约特有功能 ====================
+
+def get_position_mode(self) -> bool:
+    """获取持仓模式 (True=双向持仓/对冲模式, False=单向持仓)"""
+    if self._position_mode is not None:
         return self._position_mode
-
-    def get_leverage(self, symbol: str) -> int:
-        """获取交易对当前杠杆倍数（仅合约）"""
-        url = f"{self.futures_base_url}/fapi/v2/positionRisk"
-        query_string = self._sign({'symbol': symbol})
-        resp = self.session.get(f"{url}?{query_string}")
-        resp.raise_for_status()
-        data = resp.json()
-        if data:
-            return int(data[0].get('leverage', 20))
-        return 20
-
-    def set_leverage(self, symbol: str, leverage: int):
-        """设置杠杆倍数（仅合约）"""
-        url = f"{self.futures_base_url}/fapi/v1/leverage"
-        params = {
-            'symbol': symbol,
-            'leverage': leverage
-        }
-        query_string = self._sign(params)
-        resp = self.session.post(f"{url}?{query_string}")
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_margin_type(self, symbol: str) -> str:
-        """获取保证金模式（仅合约）"""
-        url = f"{self.futures_base_url}/fapi/v2/positionRisk"
-        query_string = self._sign({'symbol': symbol})
-        resp = self.session.get(f"{url}?{query_string}")
-        resp.raise_for_status()
-        data = resp.json()
-        if data:
-            return data[0].get('marginType', 'cross').upper()
-        return 'CROSS'
-
-    def set_margin_type(self, symbol: str, margin_type: str):
-        """设置保证金模式（仅合约）"""
-        url = f"{self.futures_base_url}/fapi/v1/marginType"
-        params = {
-            'symbol': symbol,
-            'marginType': margin_type.upper()
-        }
-        query_string = self._sign(params)
-        resp = self.session.post(f"{url}?{query_string}")
-        if resp.status_code == 200:
-            return resp.json()
-        return None
-
-    # ==================== 订单管理 ====================
     
-    def get_open_orders(self, symbol: str, market_type: str = 'futures') -> list:
-        """获取挂单"""
-        if market_type == 'spot':
-            url = f"{self.spot_base_url}/api/v3/openOrders"
-        else:
-            url = f"{self.futures_base_url}/fapi/v1/openOrders"
-        
-        query_string = self._sign({'symbol': symbol})
-        resp = self.session.get(f"{url}?{query_string}")
-        resp.raise_for_status()
+    url = f"{self.futures_base_url}/fapi/v1/positionSide/dual"
+    query_string = self._sign({})
+    resp = self.session.get(f"{url}?{query_string}")
+    resp.raise_for_status()
+    self._position_mode = resp.json().get('dualSidePosition', False)
+    return self._position_mode
+
+def get_leverage(self, symbol: str) -> int:
+    """获取交易对当前杠杆倍数（仅合约）"""
+    url = f"{self.futures_base_url}/fapi/v2/positionRisk"
+    query_string = self._sign({'symbol': symbol})
+    resp = self.session.get(f"{url}?{query_string}")
+    resp.raise_for_status()
+    data = resp.json()
+    if data:
+        return int(data[0].get('leverage', 20))
+    return 20
+
+def set_leverage(self, symbol: str, leverage: int):
+    """设置杠杆倍数（仅合约）"""
+    url = f"{self.futures_base_url}/fapi/v1/leverage"
+    params = {
+        'symbol': symbol,
+        'leverage': leverage
+    }
+    query_string = self._sign(params)
+    resp = self.session.post(f"{url}?{query_string}")
+    resp.raise_for_status()
+    return resp.json()
+
+def get_margin_type(self, symbol: str) -> str:
+    """获取保证金模式（仅合约）"""
+    url = f"{self.futures_base_url}/fapi/v2/positionRisk"
+    query_string = self._sign({'symbol': symbol})
+    resp = self.session.get(f"{url}?{query_string}")
+    resp.raise_for_status()
+    data = resp.json()
+    if data:
+        return data[0].get('marginType', 'cross').upper()
+    return 'CROSS'
+
+def set_margin_type(self, symbol: str, margin_type: str):
+    """设置保证金模式（仅合约）"""
+    url = f"{self.futures_base_url}/fapi/v1/marginType"
+    params = {
+        'symbol': symbol,
+        'marginType': margin_type.upper()
+    }
+    query_string = self._sign(params)
+    resp = self.session.post(f"{url}?{query_string}")
+    if resp.status_code == 200:
         return resp.json()
+    return None
 
-    def get_order_status(self, symbol: str, order_id: int, market_type: str = 'futures') -> dict:
-        """查询订单状态"""
-        try:
-            if market_type == 'spot':
-                url = f"{self.spot_base_url}/api/v3/order"
-            else:
-                url = f"{self.futures_base_url}/fapi/v1/order"
-            
-            params = {
-                'symbol': symbol,
-                'orderId': order_id
-            }
-            query_string = self._sign(params)
-            resp = self.session.get(f"{url}?{query_string}")
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            print(f"⚠️ 查询订单状态失败: {e}")
-            return None
+# ==================== 订单管理 ====================
 
-    def create_order(self, symbol: str, side: str, price: float, quantity: float,
-                     leverage: int = None, margin_type: str = None, position_side: str = None,
-                     market_type: str = 'futures'):
-        """下限价单"""
-        
-        if market_type == 'spot':
-            return self._create_spot_order(symbol, side, price, quantity)
-        else:
-            return self._create_futures_order(symbol, side, price, quantity, 
-                                              leverage, margin_type, position_side)
+def get_open_orders(self, symbol: str, market_type: str = 'futures') -> list:
+    """获取挂单"""
+    if market_type == 'spot':
+        url = f"{self.spot_base_url}/api/v3/openOrders"
+    else:
+        url = f"{self.futures_base_url}/fapi/v1/openOrders"
     
-    def _create_spot_order(self, symbol: str, side: str, price: float, quantity: float):
-        """下现货限价单"""
-        price_str = self.format_price(symbol, price, 'spot')
-        quantity_str = self.format_quantity(symbol, quantity, 'spot')
-        
-        print(f"📝 现货下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
-        
-        url = f"{self.spot_base_url}/api/v3/order"
-        params = {
-            'symbol': symbol,
-            'side': side.upper(),
-            'type': 'LIMIT',
-            'timeInForce': 'GTC',
-            'quantity': quantity_str,
-            'price': price_str
-        }
-        
-        query_string = self._sign(params)
-        resp = self.session.post(f"{url}?{query_string}")
-        
-        if resp.status_code != 200:
-            error_detail = resp.text
-            print(f"❌ 现货下单失败: {resp.status_code} - {error_detail}")
-            raise Exception(f"{error_detail}")
-        
-        return resp.json()
-    
-    def _create_futures_order(self, symbol: str, side: str, price: float, quantity: float,
-                              leverage: int = None, margin_type: str = None, position_side: str = None):
-        """下合约限价单"""
-        
-        # 设置杠杆
-        if leverage:
-            try:
-                current_leverage = self.get_leverage(symbol)
-                if current_leverage != leverage:
-                    self.set_leverage(symbol, leverage)
-                    print(f"   ✅ 杠杆: {leverage}x")
-            except Exception as e:
-                print(f"   ⚠️ 设置杠杆失败: {e}")
-        
-        # 设置保证金模式
-        if margin_type:
-            try:
-                self.set_margin_type(symbol, margin_type)
-            except:
-                pass
-        
-        price_str = self.format_price(symbol, price, 'futures')
-        quantity_str = self.format_quantity(symbol, quantity, 'futures')
-        
-        print(f"📝 合约下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
-        
-        url = f"{self.futures_base_url}/fapi/v1/order"
-        params = {
-            'symbol': symbol,
-            'side': side.upper(),
-            'type': 'LIMIT',
-            'timeInForce': 'GTC',
-            'quantity': quantity_str,
-            'price': price_str
-        }
-        
-        # 检查是否是双向持仓模式
-        is_hedge_mode = self.get_position_mode()
-        
-        if is_hedge_mode:
-            if position_side:
-                params['positionSide'] = position_side.upper()
-            else:
-                if side.upper() == 'BUY':
-                    params['positionSide'] = 'LONG'
-                else:
-                    params['positionSide'] = 'SHORT'
-            print(f"   📌 双向持仓模式, positionSide={params['positionSide']}")
-        
-        query_string = self._sign(params)
-        resp = self.session.post(f"{url}?{query_string}")
-        
-        if resp.status_code != 200:
-            error_detail = resp.text
-            print(f"❌ 合约下单失败: {resp.status_code} - {error_detail}")
-            raise Exception(f"{error_detail}")
-        
-        return resp.json()
+    query_string = self._sign({'symbol': symbol})
+    resp = self.session.get(f"{url}?{query_string}")
+    resp.raise_for_status()
+    return resp.json()
 
-    def cancel_order(self, symbol: str, order_id: int, market_type: str = 'futures'):
-        """取消订单"""
+def get_order_status(self, symbol: str, order_id: int, market_type: str = 'futures') -> dict:
+    """查询订单状态"""
+    try:
         if market_type == 'spot':
             url = f"{self.spot_base_url}/api/v3/order"
         else:
@@ -582,9 +466,125 @@ def calculate_ema(self, symbol: str, period: int, interval: str, market_type: st
             'orderId': order_id
         }
         query_string = self._sign(params)
-        resp = self.session.delete(f"{url}?{query_string}")
+        resp = self.session.get(f"{url}?{query_string}")
         resp.raise_for_status()
         return resp.json()
+    except Exception as e:
+        print(f"⚠️ 查询订单状态失败: {e}")
+        return None
+
+def create_order(self, symbol: str, side: str, price: float, quantity: float,
+                    leverage: int = None, margin_type: str = None, position_side: str = None,
+                    market_type: str = 'futures'):
+    """下限价单"""
+    
+    if market_type == 'spot':
+        return self._create_spot_order(symbol, side, price, quantity)
+    else:
+        return self._create_futures_order(symbol, side, price, quantity, 
+                                            leverage, margin_type, position_side)
+
+def _create_spot_order(self, symbol: str, side: str, price: float, quantity: float):
+    """下现货限价单"""
+    price_str = self.format_price(symbol, price, 'spot')
+    quantity_str = self.format_quantity(symbol, quantity, 'spot')
+    
+    print(f"📝 现货下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
+    
+    url = f"{self.spot_base_url}/api/v3/order"
+    params = {
+        'symbol': symbol,
+        'side': side.upper(),
+        'type': 'LIMIT',
+        'timeInForce': 'GTC',
+        'quantity': quantity_str,
+        'price': price_str
+    }
+    
+    query_string = self._sign(params)
+    resp = self.session.post(f"{url}?{query_string}")
+    
+    if resp.status_code != 200:
+        error_detail = resp.text
+        print(f"❌ 现货下单失败: {resp.status_code} - {error_detail}")
+        raise Exception(f"{error_detail}")
+    
+    return resp.json()
+
+def _create_futures_order(self, symbol: str, side: str, price: float, quantity: float,
+                            leverage: int = None, margin_type: str = None, position_side: str = None):
+    """下合约限价单"""
+    
+    # 设置杠杆
+    if leverage:
+        try:
+            current_leverage = self.get_leverage(symbol)
+            if current_leverage != leverage:
+                self.set_leverage(symbol, leverage)
+                print(f"   ✅ 杠杆: {leverage}x")
+        except Exception as e:
+            print(f"   ⚠️ 设置杠杆失败: {e}")
+    
+    # 设置保证金模式
+    if margin_type:
+        try:
+            self.set_margin_type(symbol, margin_type)
+        except:
+            pass
+    
+    price_str = self.format_price(symbol, price, 'futures')
+    quantity_str = self.format_quantity(symbol, quantity, 'futures')
+    
+    print(f"📝 合约下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
+    
+    url = f"{self.futures_base_url}/fapi/v1/order"
+    params = {
+        'symbol': symbol,
+        'side': side.upper(),
+        'type': 'LIMIT',
+        'timeInForce': 'GTC',
+        'quantity': quantity_str,
+        'price': price_str
+    }
+    
+    # 检查是否是双向持仓模式
+    is_hedge_mode = self.get_position_mode()
+    
+    if is_hedge_mode:
+        if position_side:
+            params['positionSide'] = position_side.upper()
+        else:
+            if side.upper() == 'BUY':
+                params['positionSide'] = 'LONG'
+            else:
+                params['positionSide'] = 'SHORT'
+        print(f"   📌 双向持仓模式, positionSide={params['positionSide']}")
+    
+    query_string = self._sign(params)
+    resp = self.session.post(f"{url}?{query_string}")
+    
+    if resp.status_code != 200:
+        error_detail = resp.text
+        print(f"❌ 合约下单失败: {resp.status_code} - {error_detail}")
+        raise Exception(f"{error_detail}")
+    
+    return resp.json()
+
+def cancel_order(self, symbol: str, order_id: int, market_type: str = 'futures'):
+    """取消订单"""
+    if market_type == 'spot':
+        url = f"{self.spot_base_url}/api/v3/order"
+    else:
+        url = f"{self.futures_base_url}/fapi/v1/order"
+    
+    params = {
+        'symbol': symbol,
+        'orderId': order_id
+    }
+    query_string = self._sign(params)
+    resp = self.session.delete(f"{url}?{query_string}")
+    resp.raise_for_status()
+    return resp.json()
 
 
 class EMATrailingBot:
