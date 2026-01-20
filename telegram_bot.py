@@ -257,14 +257,15 @@ async def bind_order(update, binance_order: dict, symbol: str, interval: str, em
     """执行绑定"""
     side = binance_order['side']
     quantity = float(binance_order['origQty'])
-    binance_oid = binance_order['orderId']  # 币安订单ID
+    binance_oid = binance_order['orderId']
     price = float(binance_order['price'])
     position_side = binance_order.get('positionSide', None)
     
     leverage = None
     margin_type = None
     
-    if market_type == 'future':
+    # ✅ 修复：market_type 判断用 'futures' 而不是 'future'
+    if market_type == 'futures':
         try:
             leverage = binance_client.get_leverage(symbol)
             margin_type = binance_client.get_margin_type(symbol)
@@ -272,18 +273,17 @@ async def bind_order(update, binance_order: dict, symbol: str, interval: str, em
         except:
             pass
     
-    suffix = "SPOT" if market_type == 'spot' else "FUT"
-    tracking_id = f"{symbol}_{interval}_EMA{ema}_{side}_{suffix}"
+    # 构建订单ID
+    market_prefix = "SPOT" if market_type == 'spot' else "FUT"
+    tracking_id = f"{market_prefix}_{symbol}_{interval}_EMA{ema}_{side}"
     
     try:
-        # 检查是否已存在
         orders = OrderManager.load_orders()
         exists = False
         
         for o in orders:
             if o['id'] == tracking_id:
                 exists = True
-                # 更新已有订单
                 OrderManager.update_order(tracking_id,
                     binance_order_id=binance_oid,
                     quantity=quantity,
@@ -291,13 +291,12 @@ async def bind_order(update, binance_order: dict, symbol: str, interval: str, em
                     margin_type=margin_type,
                     position_side=position_side,
                     market_type=market_type,
-                    status='active',  # 确保状态是 active
+                    status='active',
                     notified_error=False
                 )
                 break
         
         if not exists:
-            # 创建新订单 - 直接构建完整订单对象
             new_order = {
                 'id': tracking_id,
                 'symbol': symbol,
@@ -306,7 +305,7 @@ async def bind_order(update, binance_order: dict, symbol: str, interval: str, em
                 'side': side,
                 'quantity': quantity,
                 'market_type': market_type,
-                'binance_order_id': binance_oid,  # 直接设置
+                'binance_order_id': binance_oid,
                 'status': 'active',
                 'created_at': datetime.now().isoformat(),
                 'leverage': leverage,
@@ -316,26 +315,26 @@ async def bind_order(update, binance_order: dict, symbol: str, interval: str, em
             }
             orders.append(new_order)
             OrderManager.save_orders(orders)
-            
-            # 验证保存成功
-            saved_orders = OrderManager.load_orders()
-            if not any(o['id'] == tracking_id for o in saved_orders):
-                raise Exception("订单保存失败，请检查文件权限")
         
         ema_price = binance_client.calculate_ema(symbol, ema, interval, market_type)
         
+        # ✅ 修复：构建消息时转义下划线，或使用 HTML 格式
+        market_label = "SPOT" if market_type == 'spot' else "FUTURES"
         info_str = ""
-        if market_type == 'future':
+        if market_type == 'futures' and leverage:
             info_str = f"杠杆: {leverage}x | {margin_type} | {position_side}\n"
         
+        # 转义 tracking_id 中的下划线
+        escaped_id = tracking_id.replace("_", "\\_")
+        
         msg = (
-            f"✅ *绑定成功 [{market_type.upper()}]*\n\n"
-            f"ID: `{tracking_id}`\n"
+            f"✅ *绑定成功* \\[{market_label}\\]\n\n"
+            f"ID: `{escaped_id}`\n"
             f"方向: {side}\n"
             f"价格: {price:,.2f}\n"
             f"数量: {quantity}\n"
             f"{info_str}"
-            f"EMA{ema}: `{ema_price:,.2f}`"
+            f"EMA{ema}: {ema_price:,.2f}"
         )
         
     except Exception as e:
