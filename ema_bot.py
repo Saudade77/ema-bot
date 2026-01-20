@@ -301,30 +301,51 @@ class BinanceClient:
 
     # ==================== EMA 计算 ====================
     
-    def calculate_ema(self, symbol: str, period: int, interval: str, market_type: str = 'futures') -> float:
-        """计算 EMA（基于已完成K线）"""
-        if market_type == 'spot':
-            url = f"{self.spot_base_url}/api/v3/klines"
-        else:
-            url = f"{self.futures_base_url}/fapi/v1/klines"
-        
-        limit = max(period * 3, 200)
-        params = {'symbol': symbol, 'interval': interval, 'limit': limit}
-        resp = self.session.get(url, params=params)
+def calculate_ema(self, symbol: str, period: int, interval: str, market_type: str = 'future') -> float:
+    """
+    计算 EMA（与币安/TradingView 图表一致）
+    
+    使用标准 TA 计算方式：
+    1. 初始 EMA = 前 N 根 K 线收盘价的 SMA
+    2. 之后 EMA = Price × k + EMA(prev) × (1-k), k = 2/(N+1)
+    """
+    base_url = self._get_base_url(market_type)
+    endpoint = "/api/v3/klines" if market_type == 'spot' else "/fapi/v1/klines"
+    url = f"{base_url}{endpoint}"
+    
+    # 获取足够多的K线进行预热（币安最多返回1500根）
+    limit = 1500
+    params = {'symbol': symbol, 'interval': interval, 'limit': limit}
+    
+    try:
+        resp = self.session.get(url, params=params, timeout=10)
         resp.raise_for_status()
         klines = resp.json()
-        
-        # 排除最后一根未完成的K线
-        if len(klines) > 1:
-            klines = klines[:-1]
-        
-        closes = [float(k[4]) for k in klines]
-        if len(closes) < period:
-            return 0.0
-            
-        df = pd.DataFrame({'close': closes})
-        ema = df['close'].ewm(span=period, adjust=False).mean()
-        return ema.iloc[-1]
+    except Exception as e:
+        print(f"⚠️ 获取K线失败: {e}")
+        return 0.0
+    
+    # 排除最后一根未完成的K线（收盘价还在变动）
+    if len(klines) > 1:
+        klines = klines[:-1]
+    
+    closes = [float(k[4]) for k in klines]
+    
+    if len(closes) < period:
+        print(f"⚠️ K线数据不足: {len(closes)} < {period}")
+        return 0.0
+    
+    # 标准 EMA 计算
+    k = 2 / (period + 1)
+    
+    # 初始值：前 period 根的 SMA
+    ema = sum(closes[:period]) / period
+    
+    # 迭代计算
+    for close in closes[period:]:
+        ema = close * k + ema * (1 - k)
+    
+    return ema
 
     # ==================== 账户余额 ====================
     
