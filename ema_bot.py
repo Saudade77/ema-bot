@@ -56,6 +56,9 @@ INTERVAL_MAP = {
     '1M': '1M',
 }
 
+# 市场类型
+MARKET_TYPES = ['spot', 'futures']
+
 
 class OrderManager:
     """订单配置管理"""
@@ -74,7 +77,8 @@ class OrderManager:
     
     @staticmethod
     def add_order(symbol: str, interval: str, ema: int, side: str, quantity: float, 
-                  leverage: int = None, margin_type: str = None, position_side: str = None) -> dict:
+                  leverage: int = None, margin_type: str = None, position_side: str = None,
+                  market_type: str = 'futures') -> dict:
         """添加新订单追踪"""
         orders = OrderManager.load_orders()
         
@@ -91,7 +95,13 @@ class OrderManager:
         if side not in ['BUY', 'SELL']:
             raise ValueError("side必须是 BUY 或 SELL")
         
-        order_id = f"{symbol}_{interval}_EMA{ema}_{side}"
+        market_type = market_type.lower()
+        if market_type not in MARKET_TYPES:
+            raise ValueError(f"market_type必须是 {MARKET_TYPES} 之一")
+        
+        # 订单ID包含市场类型
+        market_prefix = "SPOT" if market_type == 'spot' else "FUT"
+        order_id = f"{market_prefix}_{symbol}_{interval}_EMA{ema}_{side}"
         
         for o in orders:
             if o['id'] == order_id:
@@ -107,9 +117,10 @@ class OrderManager:
             'binance_order_id': None,
             'status': 'active',
             'created_at': datetime.now().isoformat(),
-            'leverage': leverage,
-            'margin_type': margin_type,
-            'position_side': position_side,  # LONG/SHORT/BOTH
+            'market_type': market_type,  # 新增：市场类型
+            'leverage': leverage if market_type == 'futures' else None,
+            'margin_type': margin_type if market_type == 'futures' else None,
+            'position_side': position_side if market_type == 'futures' else None,
             'notified_error': False
         }
         
@@ -165,7 +176,10 @@ class BinanceClient:
         self.api_key = self.api_key.strip()
         self.api_secret = self.api_secret.strip()
         
-        self.base_url = "https://fapi.binance.com"
+        # 合约API
+        self.futures_base_url = "https://fapi.binance.com"
+        # 现货API
+        self.spot_base_url = "https://api.binance.com"
         
         self.session = requests.Session()
         self.session.headers.update({
@@ -175,18 +189,20 @@ class BinanceClient:
         self.time_offset = 0
         self._sync_time()
         
-        self._exchange_info = None
-        self._position_mode = None  # 缓存持仓模式
+        self._futures_exchange_info = None
+        self._spot_exchange_info = None
+        self._position_mode = None
     
     def _sync_time(self):
-        """同步合约服务器时间"""
+        """同步服务器时间"""
         try:
-            url = f"{self.base_url}/fapi/v1/time"
+            # 使用现货API同步时间（更通用）
+            url = f"{self.spot_base_url}/api/v3/time"
             resp = self.session.get(url, timeout=10)
             server_time = resp.json()['serverTime']
             local_time = int(time.time() * 1000)
             self.time_offset = server_time - local_time
-            print(f"⏱️ 合约服务器时间偏移: {self.time_offset}ms")
+            print(f"⏱️ 服务器时间偏移: {self.time_offset}ms")
         except Exception as e:
             print(f"⚠️ 时间同步失败: {e}")
             self.time_offset = 0
@@ -203,22 +219,35 @@ class BinanceClient:
         ).hexdigest()
         return f"{query_string}&signature={signature}"
 
-    def get_symbol_info(self, symbol: str) -> dict:
+    # ==================== 交易对信息 ====================
+    
+    def get_symbol_info(self, symbol: str, market_type: str = 'futures') -> dict:
         """获取交易对精度信息（带缓存）"""
-        if not self._exchange_info:
-            url = f"{self.base_url}/fapi/v1/exchangeInfo"
-            resp = self.session.get(url, timeout=10)
-            resp.raise_for_status()
-            self._exchange_info = resp.json()
-        
-        for s in self._exchange_info['symbols']:
-            if s['symbol'] == symbol:
-                return s
+        if market_type == 'spot':
+            if not self._spot_exchange_info:
+                url = f"{self.spot_base_url}/api/v3/exchangeInfo"
+                resp = self.session.get(url, timeout=10)
+                resp.raise_for_status()
+                self._spot_exchange_info = resp.json()
+            
+            for s in self._spot_exchange_info['symbols']:
+                if s['symbol'] == symbol:
+                    return s
+        else:
+            if not self._futures_exchange_info:
+                url = f"{self.futures_base_url}/fapi/v1/exchangeInfo"
+                resp = self.session.get(url, timeout=10)
+                resp.raise_for_status()
+                self._futures_exchange_info = resp.json()
+            
+            for s in self._futures_exchange_info['symbols']:
+                if s['symbol'] == symbol:
+                    return s
         return None
 
-    def format_price(self, symbol: str, price: float) -> str:
+    def format_price(self, symbol: str, price: float, market_type: str = 'futures') -> str:
         """根据交易对规则格式化价格"""
-        info = self.get_symbol_info(symbol)
+        info = self.get_symbol_info(symbol, market_type)
         if not info:
             return f"{price:.2f}"
         
@@ -236,9 +265,9 @@ class BinanceClient:
         
         return f"{price:.2f}"
 
-    def format_quantity(self, symbol: str, quantity: float) -> str:
+    def format_quantity(self, symbol: str, quantity: float, market_type: str = 'futures') -> str:
         """根据交易对规则格式化数量"""
-        info = self.get_symbol_info(symbol)
+        info = self.get_symbol_info(symbol, market_type)
         if not info:
             return str(quantity)
         
@@ -256,26 +285,36 @@ class BinanceClient:
         
         return str(quantity)
 
-    def get_current_price(self, symbol: str) -> float:
-        """获取合约当前价格"""
-        url = f"{self.base_url}/fapi/v1/ticker/price"
+    # ==================== 价格查询 ====================
+    
+    def get_current_price(self, symbol: str, market_type: str = 'futures') -> float:
+        """获取当前价格"""
+        if market_type == 'spot':
+            url = f"{self.spot_base_url}/api/v3/ticker/price"
+        else:
+            url = f"{self.futures_base_url}/fapi/v1/ticker/price"
+        
         params = {'symbol': symbol}
         resp = self.session.get(url, params=params)
         resp.raise_for_status()
         return float(resp.json()['price'])
 
-    def calculate_ema(self, symbol: str, period: int, interval: str) -> float:
-        """计算合约 EMA（基于已完成K线）"""
-        url = f"{self.base_url}/fapi/v1/klines"
-        # 获取更多数据用于EMA预热，提高准确性
+    # ==================== EMA 计算 ====================
+    
+    def calculate_ema(self, symbol: str, period: int, interval: str, market_type: str = 'futures') -> float:
+        """计算 EMA（基于已完成K线）"""
+        if market_type == 'spot':
+            url = f"{self.spot_base_url}/api/v3/klines"
+        else:
+            url = f"{self.futures_base_url}/fapi/v1/klines"
+        
         limit = max(period * 3, 200)
         params = {'symbol': symbol, 'interval': interval, 'limit': limit}
         resp = self.session.get(url, params=params)
         resp.raise_for_status()
         klines = resp.json()
         
-        # 关键修改：排除最后一根未完成的K线
-        # 币安返回的最后一根K线是当前正在形成的K线，收盘价会实时变化
+        # 排除最后一根未完成的K线
         if len(klines) > 1:
             klines = klines[:-1]
         
@@ -287,18 +326,120 @@ class BinanceClient:
         ema = df['close'].ewm(span=period, adjust=False).mean()
         return ema.iloc[-1]
 
-    def get_open_orders(self, symbol: str) -> list:
-        """获取合约挂单"""
-        url = f"{self.base_url}/fapi/v1/openOrders"
+    # ==================== 账户余额 ====================
+    
+    def get_account_balance(self, market_type: str = 'futures') -> dict:
+        """获取账户余额"""
+        if market_type == 'spot':
+            url = f"{self.spot_base_url}/api/v3/account"
+            query_string = self._sign({})
+            resp = self.session.get(f"{url}?{query_string}")
+            resp.raise_for_status()
+            data = resp.json()
+            
+            balances = {}
+            for asset in data.get('balances', []):
+                free = float(asset['free'])
+                if free > 0:
+                    balances[asset['asset']] = free
+            return balances
+        else:
+            url = f"{self.futures_base_url}/fapi/v2/balance"
+            query_string = self._sign({})
+            resp = self.session.get(f"{url}?{query_string}")
+            resp.raise_for_status()
+            data = resp.json()
+            
+            balances = {}
+            for asset in data:
+                if asset['asset'] == 'USDT':
+                    balances['USDT'] = float(asset['availableBalance'])
+                    break
+            return balances
+
+    # ==================== 合约特有功能 ====================
+    
+    def get_position_mode(self) -> bool:
+        """获取持仓模式 (True=双向持仓/对冲模式, False=单向持仓)"""
+        if self._position_mode is not None:
+            return self._position_mode
+        
+        url = f"{self.futures_base_url}/fapi/v1/positionSide/dual"
+        query_string = self._sign({})
+        resp = self.session.get(f"{url}?{query_string}")
+        resp.raise_for_status()
+        self._position_mode = resp.json().get('dualSidePosition', False)
+        return self._position_mode
+
+    def get_leverage(self, symbol: str) -> int:
+        """获取交易对当前杠杆倍数（仅合约）"""
+        url = f"{self.futures_base_url}/fapi/v2/positionRisk"
+        query_string = self._sign({'symbol': symbol})
+        resp = self.session.get(f"{url}?{query_string}")
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            return int(data[0].get('leverage', 20))
+        return 20
+
+    def set_leverage(self, symbol: str, leverage: int):
+        """设置杠杆倍数（仅合约）"""
+        url = f"{self.futures_base_url}/fapi/v1/leverage"
+        params = {
+            'symbol': symbol,
+            'leverage': leverage
+        }
+        query_string = self._sign(params)
+        resp = self.session.post(f"{url}?{query_string}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_margin_type(self, symbol: str) -> str:
+        """获取保证金模式（仅合约）"""
+        url = f"{self.futures_base_url}/fapi/v2/positionRisk"
+        query_string = self._sign({'symbol': symbol})
+        resp = self.session.get(f"{url}?{query_string}")
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            return data[0].get('marginType', 'cross').upper()
+        return 'CROSS'
+
+    def set_margin_type(self, symbol: str, margin_type: str):
+        """设置保证金模式（仅合约）"""
+        url = f"{self.futures_base_url}/fapi/v1/marginType"
+        params = {
+            'symbol': symbol,
+            'marginType': margin_type.upper()
+        }
+        query_string = self._sign(params)
+        resp = self.session.post(f"{url}?{query_string}")
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+
+    # ==================== 订单管理 ====================
+    
+    def get_open_orders(self, symbol: str, market_type: str = 'futures') -> list:
+        """获取挂单"""
+        if market_type == 'spot':
+            url = f"{self.spot_base_url}/api/v3/openOrders"
+        else:
+            url = f"{self.futures_base_url}/fapi/v1/openOrders"
+        
         query_string = self._sign({'symbol': symbol})
         resp = self.session.get(f"{url}?{query_string}")
         resp.raise_for_status()
         return resp.json()
 
-    def get_order_status(self, symbol: str, order_id: int) -> dict:
-        """查询合约订单状态"""
+    def get_order_status(self, symbol: str, order_id: int, market_type: str = 'futures') -> dict:
+        """查询订单状态"""
         try:
-            url = f"{self.base_url}/fapi/v1/order"
+            if market_type == 'spot':
+                url = f"{self.spot_base_url}/api/v3/order"
+            else:
+                url = f"{self.futures_base_url}/fapi/v1/order"
+            
             params = {
                 'symbol': symbol,
                 'orderId': order_id
@@ -311,83 +452,46 @@ class BinanceClient:
             print(f"⚠️ 查询订单状态失败: {e}")
             return None
 
-    def get_account_balance(self) -> dict:
-        """获取合约账户余额"""
-        url = f"{self.base_url}/fapi/v2/balance"
-        query_string = self._sign({})
-        resp = self.session.get(f"{url}?{query_string}")
-        resp.raise_for_status()
-        data = resp.json()
-        
-        balances = {}
-        for asset in data:
-            if asset['asset'] == 'USDT':
-                balances['USDT'] = float(asset['availableBalance'])
-                break
-        return balances
-
-    def get_position_mode(self) -> bool:
-        """获取持仓模式 (True=双向持仓/对冲模式, False=单向持仓)"""
-        if self._position_mode is not None:
-            return self._position_mode
-        
-        url = f"{self.base_url}/fapi/v1/positionSide/dual"
-        query_string = self._sign({})
-        resp = self.session.get(f"{url}?{query_string}")
-        resp.raise_for_status()
-        self._position_mode = resp.json().get('dualSidePosition', False)
-        return self._position_mode
-
-    def get_leverage(self, symbol: str) -> int:
-        """获取交易对当前杠杆倍数"""
-        url = f"{self.base_url}/fapi/v2/positionRisk"
-        query_string = self._sign({'symbol': symbol})
-        resp = self.session.get(f"{url}?{query_string}")
-        resp.raise_for_status()
-        data = resp.json()
-        if data:
-            return int(data[0].get('leverage', 20))
-        return 20
-
-    def set_leverage(self, symbol: str, leverage: int):
-        """设置杠杆倍数"""
-        url = f"{self.base_url}/fapi/v1/leverage"
-        params = {
-            'symbol': symbol,
-            'leverage': leverage
-        }
-        query_string = self._sign(params)
-        resp = self.session.post(f"{url}?{query_string}")
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_margin_type(self, symbol: str) -> str:
-        """获取保证金模式 (ISOLATED=逐仓, CROSSED=全仓)"""
-        url = f"{self.base_url}/fapi/v2/positionRisk"
-        query_string = self._sign({'symbol': symbol})
-        resp = self.session.get(f"{url}?{query_string}")
-        resp.raise_for_status()
-        data = resp.json()
-        if data:
-            return data[0].get('marginType', 'cross').upper()
-        return 'CROSS'
-
-    def set_margin_type(self, symbol: str, margin_type: str):
-        """设置保证金模式 (ISOLATED=逐仓, CROSSED=全仓)"""
-        url = f"{self.base_url}/fapi/v1/marginType"
-        params = {
-            'symbol': symbol,
-            'marginType': margin_type.upper()
-        }
-        query_string = self._sign(params)
-        resp = self.session.post(f"{url}?{query_string}")
-        # 如果已经是该模式，会返回错误，忽略
-        if resp.status_code == 200:
-            return resp.json()
-        return None
-
     def create_order(self, symbol: str, side: str, price: float, quantity: float,
-                     leverage: int = None, margin_type: str = None, position_side: str = None):
+                     leverage: int = None, margin_type: str = None, position_side: str = None,
+                     market_type: str = 'futures'):
+        """下限价单"""
+        
+        if market_type == 'spot':
+            return self._create_spot_order(symbol, side, price, quantity)
+        else:
+            return self._create_futures_order(symbol, side, price, quantity, 
+                                              leverage, margin_type, position_side)
+    
+    def _create_spot_order(self, symbol: str, side: str, price: float, quantity: float):
+        """下现货限价单"""
+        price_str = self.format_price(symbol, price, 'spot')
+        quantity_str = self.format_quantity(symbol, quantity, 'spot')
+        
+        print(f"📝 现货下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
+        
+        url = f"{self.spot_base_url}/api/v3/order"
+        params = {
+            'symbol': symbol,
+            'side': side.upper(),
+            'type': 'LIMIT',
+            'timeInForce': 'GTC',
+            'quantity': quantity_str,
+            'price': price_str
+        }
+        
+        query_string = self._sign(params)
+        resp = self.session.post(f"{url}?{query_string}")
+        
+        if resp.status_code != 200:
+            error_detail = resp.text
+            print(f"❌ 现货下单失败: {resp.status_code} - {error_detail}")
+            raise Exception(f"{error_detail}")
+        
+        return resp.json()
+    
+    def _create_futures_order(self, symbol: str, side: str, price: float, quantity: float,
+                              leverage: int = None, margin_type: str = None, position_side: str = None):
         """下合约限价单"""
         
         # 设置杠杆
@@ -407,12 +511,12 @@ class BinanceClient:
             except:
                 pass
         
-        price_str = self.format_price(symbol, price)
-        quantity_str = self.format_quantity(symbol, quantity)
+        price_str = self.format_price(symbol, price, 'futures')
+        quantity_str = self.format_quantity(symbol, quantity, 'futures')
         
-        print(f"📝 下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
+        print(f"📝 合约下单: {symbol} {side} 价格={price_str} 数量={quantity_str}")
         
-        url = f"{self.base_url}/fapi/v1/order"
+        url = f"{self.futures_base_url}/fapi/v1/order"
         params = {
             'symbol': symbol,
             'side': side.upper(),
@@ -426,14 +530,9 @@ class BinanceClient:
         is_hedge_mode = self.get_position_mode()
         
         if is_hedge_mode:
-            # 双向持仓模式必须指定 positionSide
             if position_side:
                 params['positionSide'] = position_side.upper()
             else:
-                # 根据 side 自动推断 positionSide
-                # BUY 开多 -> LONG, SELL 平多 -> LONG
-                # SELL 开空 -> SHORT, BUY 平空 -> SHORT
-                # 这里假设是开仓操作
                 if side.upper() == 'BUY':
                     params['positionSide'] = 'LONG'
                 else:
@@ -445,14 +544,18 @@ class BinanceClient:
         
         if resp.status_code != 200:
             error_detail = resp.text
-            print(f"❌ 下单失败: {resp.status_code} - {error_detail}")
+            print(f"❌ 合约下单失败: {resp.status_code} - {error_detail}")
             raise Exception(f"{error_detail}")
         
         return resp.json()
 
-    def cancel_order(self, symbol: str, order_id: int):
-        """取消合约订单"""
-        url = f"{self.base_url}/fapi/v1/order"
+    def cancel_order(self, symbol: str, order_id: int, market_type: str = 'futures'):
+        """取消订单"""
+        if market_type == 'spot':
+            url = f"{self.spot_base_url}/api/v3/order"
+        else:
+            url = f"{self.futures_base_url}/fapi/v1/order"
+        
         params = {
             'symbol': symbol,
             'orderId': order_id
@@ -480,15 +583,20 @@ class EMATrailingBot:
         binance_order_id = order_config.get('binance_order_id')
         order_id = order_config['id']
         notified = order_config.get('notified_error', False)
+        market_type = order_config.get('market_type', 'futures')
+        
+        # 合约特有参数
         leverage = order_config.get('leverage')
         margin_type = order_config.get('margin_type')
         position_side = order_config.get('position_side')
         
+        market_icon = "🔵" if market_type == 'spot' else "🟡"
+        
         try:
-            ema_price = self.client.calculate_ema(symbol, ema_period, interval)
-            current_price = self.client.get_current_price(symbol)
+            ema_price = self.client.calculate_ema(symbol, ema_period, interval, market_type)
+            current_price = self.client.get_current_price(symbol, market_type)
             
-            open_orders = self.client.get_open_orders(symbol)
+            open_orders = self.client.get_open_orders(symbol, market_type)
             our_order = None
             
             if binance_order_id:
@@ -502,19 +610,20 @@ class EMATrailingBot:
                 price_diff = abs(order_price - ema_price) / ema_price
                 
                 if price_diff > self.price_threshold:
-                    print(f"🔄 更新 {order_id}: {order_price:.2f} → {ema_price:.2f}")
+                    print(f"{market_icon} 更新 {order_id}: {order_price:.2f} → {ema_price:.2f}")
                     
                     # 1. 取消旧订单
                     try:
-                        self.client.cancel_order(symbol, binance_order_id)
+                        self.client.cancel_order(symbol, binance_order_id, market_type)
                         print(f"   ✅ 已取消旧订单")
                     except Exception as cancel_err:
                         error_str = str(cancel_err)
                         if "Unknown order" in error_str or "-2011" in error_str:
-                            old_status = self.client.get_order_status(symbol, binance_order_id)
+                            old_status = self.client.get_order_status(symbol, binance_order_id, market_type)
                             if old_status and old_status.get('status') == 'FILLED':
                                 OrderManager.remove_order(order_id)
-                                send_telegram_message(f"🎉 *订单已成交*\n\nID: `{order_id}`")
+                                market_label = "现货" if market_type == 'spot' else "合约"
+                                send_telegram_message(f"🎉 *{market_label}订单已成交*\n\nID: `{order_id}`")
                                 return "🎉 已成交"
                         return f"⚠️ 取消失败"
                     
@@ -526,7 +635,8 @@ class EMATrailingBot:
                             symbol, side, ema_price, quantity,
                             leverage=leverage, 
                             margin_type=margin_type,
-                            position_side=position_side
+                            position_side=position_side,
+                            market_type=market_type
                         )
                         new_order_id = new_order['orderId']
                         
@@ -537,9 +647,10 @@ class EMATrailingBot:
                         
                         diff_pct = ((ema_price - order_price) / order_price) * 100
                         arrow = "↑" if diff_pct > 0 else "↓"
+                        market_label = "现货" if market_type == 'spot' else "合约"
                         
                         send_telegram_message(
-                            f"🔄 *订单已更新*\n\n"
+                            f"🔄 *{market_label}订单已更新*\n\n"
                             f"ID: `{order_id}`\n"
                             f"{order_price:,.2f} → {ema_price:,.2f} ({arrow}{abs(diff_pct):.2f}%)"
                         )
@@ -550,7 +661,6 @@ class EMATrailingBot:
                         error_msg = str(create_err)
                         print(f"   ❌ 创建失败: {error_msg[:100]}")
                         
-                        # 只通知一次
                         if not notified:
                             send_telegram_message(
                                 f"⚠️ *订单更新失败*\n\n"
@@ -569,14 +679,15 @@ class EMATrailingBot:
             else:
                 # 订单不存在
                 if binance_order_id is not None:
-                    order_status = self.client.get_order_status(symbol, binance_order_id)
+                    order_status = self.client.get_order_status(symbol, binance_order_id, market_type)
                     
                     if order_status and order_status.get('status') == 'FILLED':
-                        send_telegram_message(f"🎉 *订单已成交!*\n\nID: `{order_id}`")
+                        market_label = "现货" if market_type == 'spot' else "合约"
+                        send_telegram_message(f"🎉 *{market_label}订单已成交!*\n\nID: `{order_id}`")
                         OrderManager.remove_order(order_id)
                         return "🎉 已成交"
                     
-                    print(f"📌 重新创建 {order_id}")
+                    print(f"{market_icon} 重新创建 {order_id}")
                 
                 # 创建新订单
                 try:
@@ -584,15 +695,17 @@ class EMATrailingBot:
                         symbol, side, ema_price, quantity,
                         leverage=leverage, 
                         margin_type=margin_type,
-                        position_side=position_side
+                        position_side=position_side,
+                        market_type=market_type
                     )
                     OrderManager.update_order(order_id,
                         binance_order_id=new_order['orderId'],
                         notified_error=False
                     )
                     
+                    market_label = "现货" if market_type == 'spot' else "合约"
                     send_telegram_message(
-                        f"📌 *新订单已创建*\n\n"
+                        f"📌 *新{market_label}订单已创建*\n\n"
                         f"ID: `{order_id}`\n"
                         f"价格: `{ema_price:,.2f}`"
                     )
@@ -603,7 +716,6 @@ class EMATrailingBot:
                     error_msg = str(create_err)
                     print(f"❌ 创建失败: {error_msg[:100]}")
                     
-                    # 只通知一次
                     if not notified:
                         send_telegram_message(
                             f"⚠️ *创建订单失败*\n\n"
@@ -618,7 +730,6 @@ class EMATrailingBot:
             error_msg = str(e)
             print(f"❌ {order_id}: {error_msg[:50]}")
             
-            # 只通知一次
             if not notified:
                 send_telegram_message(f"⚠️ *处理错误*\n\nID: `{order_id}`\n{error_msg[:100]}")
                 OrderManager.set_notified(order_id, True)
@@ -628,11 +739,11 @@ class EMATrailingBot:
     def run(self, check_interval: int = 60):
         """主循环"""
         print("=" * 50)
-        print("🚀 EMA追踪机器人启动")
+        print("🚀 EMA追踪机器人启动 (支持现货+合约)")
         print("=" * 50)
         
         if TELEGRAM_TOKEN:
-            send_telegram_message(f"🚀 *机器人已启动*\n\n每{check_interval}秒检查")
+            send_telegram_message(f"🚀 *机器人已启动*\n\n支持现货+合约\n每{check_interval}秒检查")
         
         while True:
             try:
@@ -640,10 +751,14 @@ class EMATrailingBot:
                 active_orders = [o for o in orders if o.get('status') == 'active']
                 
                 if active_orders:
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] {len(active_orders)}个订单")
+                    spot_count = len([o for o in active_orders if o.get('market_type') == 'spot'])
+                    fut_count = len(active_orders) - spot_count
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 现货:{spot_count} 合约:{fut_count}")
+                    
                     for order in active_orders:
+                        market_icon = "🔵" if order.get('market_type') == 'spot' else "🟡"
                         result = self.process_order(order)
-                        print(f"  {order['id']}: {result}")
+                        print(f"  {market_icon} {order['id']}: {result}")
                 
             except KeyboardInterrupt:
                 print("\n⏹️ 停止")
@@ -656,14 +771,18 @@ class EMATrailingBot:
 
 def print_help():
     print("""
-╔═══════════════════════════════════════════════════╗
-║         EMA追踪机器人 - 使用说明                  ║
-╠═══════════════════════════════════════════════════╣
-║  python ema_bot.py run      # 运行               ║
-║  python ema_bot.py list     # 查看订单           ║
-║  python ema_bot.py remove <ID>  # 删除           ║
-║  python ema_bot.py ema <币种> <周期>  # 查EMA    ║
-╚═══════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════════╗
+║            EMA追踪机器人 - 使用说明 (支持现货+合约)            ║
+╠═══════════════════════════════════════════════════════════════╣
+║  python ema_bot.py run [间隔]       # 运行                    ║
+║  python ema_bot.py list             # 查看订单                ║
+║  python ema_bot.py remove <ID>      # 删除订单                ║
+║  python ema_bot.py ema <币种> <周期> [market]  # 查EMA        ║
+║  python ema_bot.py price <币种> [market]       # 查价格       ║
+║  python ema_bot.py balance [market]            # 查余额       ║
+║                                                               ║
+║  market 可选: spot (现货) / futures (合约，默认)              ║
+╚═══════════════════════════════════════════════════════════════╝
 """)
 
 
@@ -673,11 +792,21 @@ def cmd_list(args):
         print("暂无订单")
         return
     
+    print("\n📋 订单列表:")
+    print("-" * 60)
     for o in orders:
+        market_type = o.get('market_type', 'futures')
+        market_icon = "🔵现货" if market_type == 'spot' else "🟡合约"
         ps = o.get('position_side', '-')
         lv = o.get('leverage', '-')
         mt = o.get('margin_type', '-')
-        print(f"{o['id']}: {o['side']} {o['quantity']} | {lv}x {mt} {ps}")
+        
+        print(f"{market_icon} {o['id']}")
+        if market_type == 'futures':
+            print(f"   {o['side']} {o['quantity']} | {lv}x {mt} {ps}")
+        else:
+            print(f"   {o['side']} {o['quantity']}")
+    print("-" * 60)
 
 
 def cmd_remove(args):
@@ -692,7 +821,8 @@ def cmd_remove(args):
         if o['id'] == order_id and o.get('binance_order_id'):
             try:
                 client = BinanceClient()
-                client.cancel_order(o['symbol'], o['binance_order_id'])
+                market_type = o.get('market_type', 'futures')
+                client.cancel_order(o['symbol'], o['binance_order_id'], market_type)
             except:
                 pass
     
@@ -704,7 +834,7 @@ def cmd_remove(args):
 
 def cmd_ema(args):
     if len(args) < 2:
-        print("用法: python ema_bot.py ema <币种> <周期>")
+        print("用法: python ema_bot.py ema <币种> <周期> [spot/futures]")
         return
     
     symbol = args[0].upper()
@@ -712,14 +842,50 @@ def cmd_ema(args):
         symbol += 'USDT'
     
     interval = INTERVAL_MAP.get(args[1].lower(), args[1])
-    client = BinanceClient()
-    price = client.get_current_price(symbol)
+    market_type = args[2].lower() if len(args) > 2 else 'futures'
     
-    print(f"\n{symbol} ({interval}) = {price:.2f}")
+    if market_type not in MARKET_TYPES:
+        print(f"❌ market_type 须为 {MARKET_TYPES}")
+        return
+    
+    client = BinanceClient()
+    price = client.get_current_price(symbol, market_type)
+    market_label = "现货" if market_type == 'spot' else "合约"
+    
+    print(f"\n{market_label} {symbol} ({interval}) = {price:.2f}")
     for ema in SUPPORTED_EMA:
-        val = client.calculate_ema(symbol, ema, interval)
+        val = client.calculate_ema(symbol, ema, interval, market_type)
         diff = ((price - val) / val) * 100
         print(f"  EMA{ema}: {val:.2f} ({diff:+.2f}%)")
+
+
+def cmd_price(args):
+    if len(args) < 1:
+        print("用法: python ema_bot.py price <币种> [spot/futures]")
+        return
+    
+    symbol = args[0].upper()
+    if not symbol.endswith('USDT'):
+        symbol += 'USDT'
+    
+    market_type = args[1].lower() if len(args) > 1 else 'futures'
+    
+    client = BinanceClient()
+    price = client.get_current_price(symbol, market_type)
+    market_label = "现货" if market_type == 'spot' else "合约"
+    print(f"💰 {market_label} {symbol}: {price:,.2f}")
+
+
+def cmd_balance(args):
+    market_type = args[0].lower() if len(args) > 0 else 'futures'
+    
+    client = BinanceClient()
+    balances = client.get_account_balance(market_type)
+    market_label = "现货" if market_type == 'spot' else "合约"
+    
+    print(f"\n💰 {market_label}余额:")
+    for asset, amount in balances.items():
+        print(f"  {asset}: {amount:,.4f}")
 
 
 def main():
@@ -739,6 +905,10 @@ def main():
         cmd_remove(args)
     elif cmd == 'ema':
         cmd_ema(args)
+    elif cmd == 'price':
+        cmd_price(args)
+    elif cmd == 'balance':
+        cmd_balance(args)
     else:
         print_help()
 
