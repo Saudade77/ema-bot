@@ -218,6 +218,13 @@ class BinanceClient:
             hashlib.sha256
         ).hexdigest()
         return f"{query_string}&signature={signature}"
+    
+    def _get_base_url(self, market_type: str) -> str:
+        """根据市场类型返回对应的 API URL"""
+        if market_type == 'spot':
+            return self.spot_base_url
+        else:
+            return self.futures_base_url
 
     # ==================== 交易对信息 ====================
     
