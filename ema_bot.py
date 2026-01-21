@@ -614,14 +614,21 @@ class EMATrailingBot:
         position_side = order_config.get('position_side')
         
         market_icon = "🔵" if market_type == 'spot' else "🟡"
+        market_label = "现货" if market_type == 'spot' else "合约"
         
         try:
+            # 计算当前 EMA 价格
             ema_price = self.client.calculate_ema(symbol, ema_period, interval, market_type)
+            if ema_price == 0:
+                return "⚠️ EMA计算失败"
+            
             current_price = self.client.get_current_price(symbol, market_type)
             
+            # 获取当前挂单列表
             open_orders = self.client.get_open_orders(symbol, market_type)
             our_order = None
             
+            # 查找我们的订单
             if binance_order_id:
                 for o in open_orders:
                     if o['orderId'] == binance_order_id:
@@ -629,6 +636,7 @@ class EMATrailingBot:
                         break
             
             if our_order:
+                # ========== 订单存在，检查是否需要更新价格 ==========
                 order_price = float(our_order['price'])
                 price_diff = abs(order_price - ema_price) / ema_price
                 
@@ -641,11 +649,11 @@ class EMATrailingBot:
                         print(f"   ✅ 已取消旧订单")
                     except Exception as cancel_err:
                         error_str = str(cancel_err)
+                        # 订单可能已经成交
                         if "Unknown order" in error_str or "-2011" in error_str:
                             old_status = self.client.get_order_status(symbol, binance_order_id, market_type)
                             if old_status and old_status.get('status') == 'FILLED':
                                 OrderManager.remove_order(order_id)
-                                market_label = "现货" if market_type == 'spot' else "合约"
                                 send_telegram_message(f"🎉 *{market_label}订单已成交*\n\nID: `{order_id}`")
                                 return "🎉 已成交"
                         return f"⚠️ 取消失败"
@@ -670,7 +678,6 @@ class EMATrailingBot:
                         
                         diff_pct = ((ema_price - order_price) / order_price) * 100
                         arrow = "↑" if diff_pct > 0 else "↓"
-                        market_label = "现货" if market_type == 'spot' else "合约"
                         
                         send_telegram_message(
                             f"🔄 *{market_label}订单已更新*\n\n"
@@ -695,24 +702,44 @@ class EMATrailingBot:
                         OrderManager.update_binance_order_id(order_id, None)
                         return f"❌ 创建失败"
                 else:
+                    # 价格差异在阈值内，无需更新
                     if notified:
                         OrderManager.set_notified(order_id, False)
                     return f"✓ {price_diff*100:.2f}%"
             
             else:
-                # 订单不存在
+                # ========== 订单不在挂单列表中 ==========
                 if binance_order_id is not None:
+                    # 查询订单状态，判断是成交了还是被取消了
                     order_status = self.client.get_order_status(symbol, binance_order_id, market_type)
                     
-                    if order_status and order_status.get('status') == 'FILLED':
-                        market_label = "现货" if market_type == 'spot' else "合约"
-                        send_telegram_message(f"🎉 *{market_label}订单已成交!*\n\nID: `{order_id}`")
-                        OrderManager.remove_order(order_id)
-                        return "🎉 已成交"
-                    
-                    print(f"{market_icon} 重新创建 {order_id}")
+                    if order_status:
+                        status = order_status.get('status', '')
+                        
+                        # 已完全成交 - 移除追踪
+                        if status == 'FILLED':
+                            send_telegram_message(f"🎉 *{market_label}订单已成交!*\n\nID: `{order_id}`")
+                            OrderManager.remove_order(order_id)
+                            return "🎉 已成交"
+                        
+                        # 部分成交 - 保持追踪，等待完全成交
+                        elif status == 'PARTIALLY_FILLED':
+                            filled_qty = float(order_status.get('executedQty', 0))
+                            return f"⏳ 部分成交 {filled_qty}"
+                        
+                        # 已取消/过期/拒绝 - 重新创建
+                        elif status in ['CANCELED', 'EXPIRED', 'REJECTED']:
+                            print(f"{market_icon} 订单状态 {status}，重新创建 {order_id}")
+                            # 继续往下走，重新创建订单
+                        
+                        # 其他状态（如 NEW，但不在挂单列表？可能是延迟）
+                        else:
+                            print(f"{market_icon} 订单状态异常: {status}，尝试重新创建 {order_id}")
+                    else:
+                        # 查询失败，订单可能太旧已被币安清理
+                        print(f"{market_icon} 无法查询订单状态，重新创建 {order_id}")
                 
-                # 创建新订单
+                # ========== 创建新订单 ==========
                 try:
                     new_order = self.client.create_order(
                         symbol, side, ema_price, quantity,
@@ -726,7 +753,6 @@ class EMATrailingBot:
                         notified_error=False
                     )
                     
-                    market_label = "现货" if market_type == 'spot' else "合约"
                     send_telegram_message(
                         f"📌 *新{market_label}订单已创建*\n\n"
                         f"ID: `{order_id}`\n"
