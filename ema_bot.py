@@ -309,8 +309,9 @@ class BinanceClient:
     # ==================== EMA 计算 ====================
     
     def calculate_ema(self, symbol: str, period: int, interval: str, market_type: str = 'futures') -> float:
-        """计算 EMA（与币安/TradingView 图表一致）"""
-        
+        """
+        计算 EMA（优化版，更接近币安图表）
+        """
         if market_type == 'spot':
             base_url = self.spot_base_url
             endpoint = "/api/v3/klines"
@@ -330,9 +331,7 @@ class BinanceClient:
             print(f"⚠️ 获取K线失败: {e}")
             return 0.0
         
-        # ✅ 新增：检查是否有数据
         if not klines or len(klines) == 0:
-            print(f"⚠️ 无K线数据: {symbol}")
             return 0.0
         
         # 排除最后一根未完成的K线
@@ -341,23 +340,14 @@ class BinanceClient:
         
         closes = [float(k[4]) for k in klines]
         
-        # ✅ 新增：检查数据是否足够
         if len(closes) < period:
-            print(f"⚠️ K线数据不足: {symbol} 只有 {len(closes)} 根，需要 {period} 根")
             return 0.0
         
-        # ✅ 新增：防止除零
-        if period <= 0:
-            return 0.0
+        # ✅ 使用 pandas ewm（与币安/TradingView 更接近）
+        df = pd.DataFrame({'close': closes})
+        ema_series = df['close'].ewm(span=period, adjust=False).mean()
         
-        # 标准 EMA 计算
-        k = 2 / (period + 1)
-        ema = sum(closes[:period]) / period
-        
-        for close in closes[period:]:
-            ema = close * k + ema * (1 - k)
-        
-        return ema
+        return ema_series.iloc[-1]
 
         # ==================== 账户余额 ====================
         
